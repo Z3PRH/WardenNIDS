@@ -21,7 +21,7 @@ FEATURES_PATH = os.path.join(ARTIFACTS_DIR, 'features.pkl')
 def train_dynamic_model(csv_file):
     try:
         print("\n" + "="*50)
-        print("[INFO] Starting Hybrid NIDS/IPS Training Sequence")
+        print("[INFO] Starting Active Learning Pipeline (Zero-Day to Signature)")
         print("="*50)
         
         df = pd.read_csv(csv_file)
@@ -41,7 +41,7 @@ def _train_hybrid_models(df):
     try:
         from .models import MLModel, FeedbackLog
 
-        print("[INFO] Step 1: Cleaning and preprocessing data...")
+        print("[INFO] Step 1: Cleaning and preprocessing baseline data...")
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.dropna(inplace=True)
 
@@ -59,33 +59,39 @@ def _train_hybrid_models(df):
         available_features = [f for f in features if f in df.columns]
         X = df[available_features]
 
-        print("[INFO] Step 2: Checking for human feedback constraints...")
+        print("[INFO] Step 2: Injecting Analyst Feedback (Learning new signatures)...")
         try:
-            human_corrections = FeedbackLog.objects.filter(label=0).select_related('alert__traffic')
+            # Fetch ALL feedback (0 = False Positives/Benign, 1 = True Positives/New Attacks)
+            human_corrections = FeedbackLog.objects.all().select_related('alert__traffic')
             if human_corrections.exists():
-                print(f"[INFO] Injecting {human_corrections.count()} human corrections...")
+                print(f"[INFO] Injecting {human_corrections.count()} verified analyst corrections into training data...")
                 feedback_data = []
+                feedback_labels = []
+                
                 for log in human_corrections:
                     t = log.alert.traffic
-                    feedback_data.append([80, 1000, t.packet_count, 0, t.byte_count, 0, 0, 0, 0, 0][:len(available_features)])
+                    # Map the saved traffic stats back into the feature array
+                    row = [80, 1000, t.packet_count, 0, t.byte_count, 0, 0, 0, 0, 0][:len(available_features)]
+                    feedback_data.append(row)
+                    feedback_labels.append(log.label) # Assigns the exact label the analyst chose
                 
                 human_df = pd.DataFrame(feedback_data, columns=available_features)
                 X = pd.concat([X, human_df], ignore_index=True)
-                y = pd.concat([y, pd.Series([0] * len(human_df))], ignore_index=True)
+                y = pd.concat([y, pd.Series(feedback_labels)], ignore_index=True)
         except Exception as e:
-            print(f"[WARNING] Skipping human feedback: {e}")
+            print(f"[WARNING] Skipping human feedback integration: {e}")
 
         print("[INFO] Step 3: Scaling feature space...")
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
         X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
 
-        print("[INFO] Step 4: Training Random Forest (Supervised Signature Detection)...")
+        print("[INFO] Step 4: Upgrading Supervised Brain (Random Forest)...")
         rf = RandomForestClassifier(n_estimators=50, max_depth=10, random_state=42)
         rf.fit(X_train, y_train)
         rf_preds = rf.predict(X_test)
 
-        print("[INFO] Step 5: Training Isolation Forest (Unsupervised Anomaly Detection)...")
+        print("[INFO] Step 5: Recalibrating Unsupervised Brain (Isolation Forest)...")
         iso_forest = IsolationForest(n_estimators=100, contamination='auto', random_state=42)
         iso_forest.fit(X_scaled)
         if_preds = iso_forest.predict(X_test)
@@ -103,7 +109,6 @@ def _train_hybrid_models(df):
             ("Isolation Forest", if_preds_binary, IF_MODEL_PATH, 0.0) 
         ]
 
-        # Fix for Issue 1: We will store the RF metrics separately to send back to the frontend
         rf_metrics_flat = {}
 
         for name, preds, path, thresh in models_to_update:
@@ -134,11 +139,69 @@ def _train_hybrid_models(df):
                 }
 
         print("="*50)
-        print("[SUCCESS] Training Sequence Completed Successfully.\n")
-        
-        # We return the flat metrics dictionary so the React frontend doesn't break
+        print("[SUCCESS] Active Learning Sequence Completed Successfully.\n")
         return {"success": True, "metrics": rf_metrics_flat}
 
     except Exception as e:
         print(f"[ERROR] Engine Failure: {str(e)}")
         return {"success": False, "error": str(e)}
+
+def load_and_predict(traffic_data):
+    """
+    Waterfall Inference Engine: 
+    1. RF checks its memory for known signatures.
+    2. IF acts as a safety net to catch out-of-bounds zero-days.
+    """
+    try:
+        # 1. Load artifacts 
+        if not os.path.exists(RF_MODEL_PATH) or not os.path.exists(IF_MODEL_PATH) or not os.path.exists(SCALER_PATH):
+            return {"is_anomaly": False, "confidence": 0.0, "error": "Models not fully trained"}
+
+        rf_model = joblib.load(RF_MODEL_PATH)
+        if_model = joblib.load(IF_MODEL_PATH) 
+        scaler = joblib.load(SCALER_PATH)
+        expected_features = joblib.load(FEATURES_PATH)
+
+        # 2. Format and Scale incoming data
+        df = pd.DataFrame([traffic_data])
+        for feature in expected_features:
+            if feature not in df.columns:
+                df[feature] = 0.0
+        X_scaled = scaler.transform(df[expected_features])
+
+        # --- STEP 1: THE MEMORY CHECK (Random Forest) ---
+        rf_prediction = rf_model.predict(X_scaled)[0]
+        probabilities = rf_model.predict_proba(X_scaled)[0]
+        rf_confidence = probabilities[1] if len(probabilities) > 1 else float(rf_prediction)
+
+        # If RF recognizes it as a known threat with high confidence, we block it immediately.
+        if rf_confidence >= 0.85:
+            return {
+                "is_anomaly": True,
+                "confidence": round(float(rf_confidence) * 100, 2),
+                "model_used": "Random Forest (Known Signature)"
+            }
+
+        # --- STEP 2: THE ZERO-DAY CHECK (Isolation Forest) ---
+        # If RF thought it was safe, we ask IF to do a geometry check.
+        if_score = if_model.decision_function(X_scaled)[0]
+        
+        # A negative score means it's an anomaly. The lower the score, the worse it is.
+        if if_score < -0.05: 
+            # IF caught something RF missed. Assign a high confidence to force a block/quarantine.
+            return {
+                "is_anomaly": True,
+                "confidence": 92.0, 
+                "model_used": "Isolation Forest (Zero-Day)"
+            }
+
+        # --- STEP 3: IT IS TRULY NORMAL ---
+        return {
+            "is_anomaly": False,
+            "confidence": round(float(rf_confidence) * 100, 2),
+            "model_used": "Random Forest (Safe)"
+        }
+
+    except Exception as e:
+        print(f"[ERROR] Inference failed: {str(e)}")
+        return {"is_anomaly": False, "confidence": 0.0, "error": str(e)}

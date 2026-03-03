@@ -95,7 +95,7 @@ class TrafficViewSet(viewsets.ModelViewSet):
 def personal_network_audit(request):
     """
     Allows secondary users (students/professors) to upload logs for a safety check.
-    Returns a human-readable safety report.
+    Returns a human-readable safety report based on threat density.
     """
     file_obj = request.FILES.get('file')
     if not file_obj:
@@ -106,21 +106,58 @@ def personal_network_audit(request):
         df = pd.read_csv(io.StringIO(file_obj.read().decode('utf-8')))
         total_rows = len(df)
         
-        # Simulate ML audit for non-technical users
-        # This prevents these test scans from appearing on the main dashboard
-        anomalies_found = random.randint(0, min(total_rows, 5))
+        # 1. Strip invisible spaces and count actual anomalies based on the 'Label' column
+        if 'Label' in df.columns:
+            anomalies_found = len(df[df['Label'].astype(str).str.strip().str.upper() != 'BENIGN'])
+        else:
+            anomalies_found = 0
         
-        safety_grade = "A+"
-        recommendations = ["Your network appears secure. No malicious signatures detected."]
+        # 2. Calculate threat density percentage
+        anomaly_percentage = (anomalies_found / total_rows) * 100 if total_rows > 0 else 0
 
-        if anomalies_found > 0:
-            safety_grade = "B" if anomalies_found < 3 else "C"
+        # 3. Grading Logic based on threat density
+        if anomaly_percentage == 0:
+            safety_grade = "A+"
+            recommendations = ["Your network appears secure. No malicious signatures detected."]
+            is_safe = True
+            
+        elif anomaly_percentage < 1:
+            safety_grade = "A"
+            recommendations = ["Network is mostly secure. Minor background noise detected and ignored."]
+            is_safe = True
+            
+        elif anomaly_percentage < 5:
+            safety_grade = "B"
             recommendations = [
                 f"Warden detected {anomalies_found} unusual connection attempts.",
-                "Verify that all connected IoT devices are recognized.",
-                "Recommend rotating your WiFi WPA3 password."
+                "Suspicious probing detected. Recommend verifying firewall rules for open ports."
             ]
-        
+            is_safe = False
+            
+        elif anomaly_percentage < 15:
+            safety_grade = "C"
+            recommendations = [
+                f"Warden detected {anomalies_found} malicious connection attempts.",
+                "Active threats detected. Ensure critical ports (22, 3389) are not exposed to the public internet."
+            ]
+            is_safe = False
+            
+        elif anomaly_percentage < 30:
+            safety_grade = "D"
+            recommendations = [
+                f"High-volume attack detected ({anomaly_percentage:.1f}% of traffic).",
+                "Recommend immediate IP blocking of top offending addresses."
+            ]
+            is_safe = False
+            
+        else:
+            safety_grade = "F"
+            recommendations = [
+                f"CRITICAL: Network under severe active attack ({anomaly_percentage:.1f}% malicious).",
+                "Deploy DDoS mitigation countermeasures and firewall lockdowns immediately."
+            ]
+            is_safe = False
+
         return Response({
             "report_id": f"WRDN-AUDIT-{random.randint(1000, 9999)}",
             "timestamp": timezone.now(),
@@ -130,7 +167,7 @@ def personal_network_audit(request):
                 "grade": safety_grade
             },
             "recommendations": recommendations,
-            "is_safe": anomalies_found == 0
+            "is_safe": is_safe
         })
     except Exception as e:
         return Response({"error": f"Parsing Error: {str(e)}"}, status=400)
@@ -181,6 +218,45 @@ def block_ip(request):
         except Alert.DoesNotExist:
             pass
     return Response({"message": f"IP {ip_to_block} blocked."}, status=200)
+
+# --- NEW ENDPOINT: ML FEEDBACK OVERRIDE ---
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def submit_feedback(request):
+    """
+    Allows a frontend analyst to override an AI classification.
+    Expects: {'alert_id': 123, 'label': 0} (0 = Benign/False Positive, 1 = Malicious/True Positive)
+    """
+    try:
+        alert_id = request.data.get('alert_id')
+        new_label = request.data.get('label')
+        notes = request.data.get('notes', 'Analyst override via dashboard')
+        
+        # 1. Fetch the original alert
+        alert = Alert.objects.get(alert_id=alert_id)
+        
+        # 2. Log the correction for the ML Engine to read during next training cycle
+        FeedbackLog.objects.create(
+            alert=alert,
+            user=request.user,
+            label=new_label,
+            notes=notes
+        )
+        
+        # 3. Clear it from the active/quarantine queue
+        alert.status = 'Resolved'
+        alert.save()
+        
+        return Response({
+            "success": True, 
+            "message": f"Alert {alert_id} overridden. Logged for next ML training cycle."
+        })
+        
+    except Alert.DoesNotExist:
+        return Response({"success": False, "error": "Alert not found."}, status=404)
+    except Exception as e:
+        return Response({"success": False, "error": str(e)}, status=400)
+
 
 class ModelTrainingViewSet(viewsets.ViewSet):
     parser_classes = (MultiPartParser, FormParser)

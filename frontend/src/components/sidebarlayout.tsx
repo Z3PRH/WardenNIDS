@@ -6,13 +6,11 @@ import {
   BarChart3, 
   Bell,
   LogOut,
-  Settings // <-- Added Settings icon
+  Settings 
 } from 'lucide-react';
 
 const Sidebar = () => {
   const navigate = useNavigate();
-  
-  // 1. Fetch the user's role from local storage (default to secondary)
   const userRole = localStorage.getItem('userRole') || 'secondary';
   
   const handleLogout = () => {
@@ -31,19 +29,20 @@ const Sidebar = () => {
     { 
       icon: Shield, 
       label: 'DETECTION', 
-      path: '/detection' 
+      path: '/detection',
+      allowedRole: 'secondary' 
     },
     { 
       icon: Zap, 
       label: 'TRAINING', 
       path: '/training',
-      requiresPrimary: true // <-- Restricted
+      allowedRole: 'primary' 
     },
     { 
       icon: BarChart3, 
       label: 'ANALYTICS', 
       path: '/analytics',
-      requiresPrimary: true // <-- Restricted
+      allowedRole: 'primary' 
     },
     { 
       icon: Bell, 
@@ -53,14 +52,17 @@ const Sidebar = () => {
     { 
       icon: Settings, 
       label: 'SETTINGS', 
-      path: '/settings' // <-- New Settings route
+      path: '/settings' 
     },
   ];
 
-  // 3. Filter the menu: Only show 'requiresPrimary' items if the user is a primary analyst
-  const visibleMenuItems = menuItems.filter(
-    item => !item.requiresPrimary || userRole === 'primary'
-  );
+  const filteredMenu = menuItems.filter(item => {
+    // If no role is specified, everyone sees it
+    if (!item.allowedRole) return true;
+    // Otherwise, check if userRole matches the requirement
+    return item.allowedRole === userRole;
+  });
+
 
   return (
     <div className="flex h-screen bg-slate-950">
@@ -94,7 +96,7 @@ const Sidebar = () => {
         <nav className="flex-1 pt-4 px-2">
           <ul className="space-y-0.5">
             {/* Map over the FILTERED menu items */}
-            {visibleMenuItems.map((item) => (
+            {filteredMenu.map((item) => (
               <li key={item.path}>
                 <NavLink
                   to={item.path}

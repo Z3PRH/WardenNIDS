@@ -4,22 +4,40 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 // IMPORTS
 import LoginPage from '../src/components/LoginPage';
-import SidebarLayout from './components/sidebarlayout'; // The Wrapper
-import Dashboard from './Dashboard';              // The Content
+import SidebarLayout from './components/sidebarlayout'; 
+import Dashboard from './Dashboard';              
 import Analytics from './analytics';  
 import Training from './training';
-import Alerts from './alerts';            // The Content
+import Alerts from './alerts';            
 import Settings from './Settings';   
-import Detection from './Detection';    // The Content     
+import Detection from './Detection';         
 
 const queryClient = new QueryClient();
 
-// PROTECTED ROUTE WRAPPER
-const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
+/**
+ * UPDATED PROTECTED ROUTE
+ * Handles both Authentication (Token) and Authorization (Role)
+ */
+const ProtectedRoute = ({ 
+  children, 
+  requiredRole 
+}: { 
+  children: React.ReactNode, 
+  requiredRole?: 'primary' | 'secondary' 
+}) => {
   const token = localStorage.getItem('token');
+  const userRole = localStorage.getItem('userRole');
+
   if (!token) {
     return <Navigate to="/login" replace />;
   }
+
+  // RBAC Check: If a specific role is required but user doesn't match
+  if (requiredRole && userRole !== requiredRole) {
+    // Primary analysts trying to go to Detection, or Secondary trying to go to Training
+    return <Navigate to="/dashboard" replace />;
+  }
+
   return <>{children}</>;
 };
 
@@ -28,11 +46,10 @@ const App = () => {
     <QueryClientProvider client={queryClient}>
       <Router>
         <Routes>
-          {/* 1. PUBLIC ROUTE (Login) */}
+          {/* PUBLIC ROUTE */}
           <Route path="/login" element={<LoginPage />} />
 
-          {/* 2. PROTECTED WRAPPER (SidebarLayout) */}
-          {/* This Route wraps everything that needs the Sidebar */}
+          {/* SHARED PROTECTED LAYOUT */}
           <Route 
             path="/" 
             element={
@@ -41,23 +58,39 @@ const App = () => {
               </ProtectedRoute>
             }
           >
-            {/* 3. CHILD ROUTES (Render inside SidebarLayout's <Outlet />) */}
-            
-            {/* Redirect root "/" to "/dashboard" */}
             <Route index element={<Navigate to="/dashboard" replace />} />
-            
             <Route path="dashboard" element={<Dashboard />} />
-            <Route path="analytics" element={<Analytics />} />
-            <Route path="training" element={<Training />} />
-            
-            {/* Add placeholders for other sidebar links so they don't 404 */}
-            <Route path="detection" element={<Detection/>}/>
             <Route path="alerts" element={<Alerts />} />
-            
-            {/* 4. ADDED SETTINGS ROUTE */}
             <Route path="settings" element={<Settings />} />
-          </Route>
 
+            {/* SECONDARY ONLY: Personal Audit Tool */}
+            <Route 
+              path="detection" 
+              element={
+                <ProtectedRoute requiredRole="secondary">
+                  <Detection/>
+                </ProtectedRoute>
+              }
+            />
+
+            {/* PRIMARY ONLY: Admin Tools */}
+            <Route 
+              path="analytics" 
+              element={
+                <ProtectedRoute requiredRole="primary">
+                  <Analytics />
+                </ProtectedRoute>
+              }
+            />
+            <Route 
+              path="training" 
+              element={
+                <ProtectedRoute requiredRole="primary">
+                  <Training />
+                </ProtectedRoute>
+              }
+            />
+          </Route>
         </Routes>
       </Router>
     </QueryClientProvider>

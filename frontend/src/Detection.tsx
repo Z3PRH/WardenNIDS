@@ -11,6 +11,23 @@ const Detection = () => {
     const [file, setFile] = useState<File | null>(null);
     const [report, setReport] = useState<any>(null);
 
+    // Derives threat density and security rating from the backend report data
+    const getThreatStats = (r: any) => {
+        const { packets_scanned, anomalies } = r.summary;
+        const anomalyPct = packets_scanned > 0 ? (anomalies / packets_scanned) * 100 : 0;
+        const securityRating = Math.max(0, 100 - anomalyPct).toFixed(1) + "%";
+        return { anomalyPct, securityRating };
+    };
+
+    // Returns color class based on safety grade from backend grading logic
+    const getGradeColor = (grade: string) => {
+        if (grade.startsWith('A')) return 'text-neon-green';
+        if (grade === 'B') return 'text-blue-400';
+        if (grade === 'C') return 'text-yellow-400';
+        if (grade === 'D') return 'text-orange-400';
+        return 'text-red-500'; // F
+    };
+
     // Mutation to send the log to the personal-audit endpoint
     const auditMutation = useMutation({
         mutationFn: async (fileToUpload: File) => {
@@ -26,54 +43,127 @@ const Detection = () => {
         }
     });
 
-    // --- PDF EXPORT ENGINE ---
+    // --- USER-FRIENDLY PDF EXPORT ENGINE ---
     const downloadPDF = () => {
         if (!report) return;
         const doc = new jsPDF();
         const date = new Date().toLocaleString();
         
-        // Document Header & Branding
-        doc.setFillColor(15, 23, 42); // Slate-900
+        // 1. Dynamic Color & Text based on Safety Grade
+        const grade = report.summary.grade;
+        let gradeColor = [0, 200, 136]; // Default Neon/Emerald Green (A+, A)
+        let gradeContext = "Your network traffic appears clean and secure.";
+        
+        if (grade === 'B' || grade === 'C') {
+            gradeColor = [250, 175, 0]; // Warning Yellow/Orange
+            gradeContext = "Some suspicious background activity noticed. Review recommended.";
+        } else if (grade === 'D' || grade === 'F') {
+            gradeColor = [239, 68, 68]; // Critical Red
+            gradeContext = "WARNING: High level of malicious activity detected. Action required.";
+        }
+
+        // --- 2. HEADER: Clean & Reassuring ---
+        doc.setFillColor(15, 23, 42); // Dark slate background
         doc.rect(0, 0, 210, 45, 'F');
-        doc.setTextColor(0, 255, 136); // Neon Green
-        doc.setFontSize(24);
-        doc.text("WARDEN SECURITY AUDIT", 20, 28);
         
-        doc.setFontSize(10);
         doc.setTextColor(255, 255, 255);
-        doc.text("AI-POWERED NETWORK ANOMALY DETECTION REPORT", 20, 38);
-
-        // Report Metadata
-        doc.setTextColor(50, 50, 50);
-        doc.setFontSize(9);
-        doc.text(`REPORT ID: ${report.report_id}`, 20, 60);
-        doc.text(`AUDIT DATE: ${date}`, 20, 65);
-        doc.text(`SOURCE FILE: ${file?.name || 'Network_Log.csv'}`, 20, 70);
-
-        // Results Section
-        doc.setFontSize(14);
-        doc.setTextColor(0, 0, 0);
-        doc.text("SECURITY ASSESSMENT", 20, 85);
+        doc.setFontSize(24);
+        doc.setFont("helvetica", "bold");
+        doc.text("WARDEN", 20, 22);
         
+        doc.setTextColor(0, 255, 136); // Warden Neon Green
         doc.setFontSize(12);
-        doc.text(`- FINAL GRADE: ${report.summary.grade}`, 25, 95);
-        doc.text(`- TOTAL PACKETS ANALYZED: ${report.summary.packets_scanned.toLocaleString()}`, 25, 103);
-        doc.text(`- ANOMALIES DETECTED: ${report.summary.anomalies}`, 25, 111);
+        doc.text("PERSONAL CYBERSECURITY SCORECARD", 20, 32);
+        
+        // Header Meta Data (Right-aligned)
+        doc.setTextColor(150, 150, 150);
+        doc.setFontSize(9);
+        doc.setFont("helvetica", "normal");
+        doc.text(`Date: ${date.split(',')[0]}`, 140, 22);
+        doc.text(`Report ID: ${report.report_id}`, 140, 28);
 
-        // Recommendations
+        // --- 3. THE GRADE SECTION (High Visual Impact) ---
+        doc.setFillColor(248, 250, 252); // Very light gray/blue box
+        doc.rect(20, 55, 170, 45, 'F');
+        
+        // Big Grade Letter
+        doc.setTextColor(gradeColor[0], gradeColor[1], gradeColor[2]);
+        doc.setFontSize(45);
+        doc.setFont("helvetica", "bold");
+        doc.text(grade, 35, 85);
+        
+        // Grade Context Text
+        doc.setTextColor(30, 30, 30);
+        doc.setFontSize(16);
+        doc.text("Security Health Grade", 70, 70);
+        
+        doc.setFontSize(11);
+        doc.setFont("helvetica", "normal");
+        doc.setTextColor(80, 80, 80);
+        doc.text(gradeContext, 70, 80);
+        doc.text("This grade evaluates the safety of your uploaded network log.", 70, 88);
+
+        // --- 4. SIMPLIFIED DIAGNOSTICS ---
+        doc.setTextColor(30, 30, 30);
         doc.setFontSize(14);
-        doc.text("SYSTEM RECOMMENDATIONS", 20, 130);
-        doc.setFontSize(10);
+        doc.setFont("helvetica", "bold");
+        doc.text("What Did We Find?", 20, 120);
+        
+        doc.setFontSize(11);
+        doc.setFont("helvetica", "normal");
+        doc.setTextColor(60, 60, 60);
+        
+        // Translating technical terms to plain English
+        const totalConnections = report.summary.packets_scanned.toLocaleString();
+        const badConnections = report.summary.anomalies.toLocaleString();
+        
+        doc.text(`• Total Network Interactions Checked: ${totalConnections}`, 25, 130);
+        doc.text(`• Suspicious/Harmful Interactions: ${badConnections}`, 25, 138);
+
+        // --- 5. ACTION PLAN (With Auto-Wrapping) ---
+        doc.setTextColor(30, 30, 30);
+        doc.setFontSize(14);
+        doc.setFont("helvetica", "bold");
+        doc.text("Your Action Plan", 20, 155);
+        
+        doc.setFontSize(11);
+        doc.setFont("helvetica", "normal");
+        doc.setTextColor(60, 60, 60);
+        
+        let yPos = 165;
         report.recommendations.forEach((rec: string, i: number) => {
-            doc.text(`${i + 1}. ${rec}`, 25, 140 + (i * 10));
+            // splitTextToSize ensures long ML engine recommendations don't run off the page
+            const splitText = doc.splitTextToSize(`${i + 1}. ${rec}`, 160);
+            doc.text(splitText, 25, yPos);
+            yPos += (splitText.length * 7) + 3; // Dynamically adjust spacing based on text length
         });
 
-        // Footer
-        doc.setTextColor(150, 150, 150);
-        doc.setFontSize(8);
-        doc.text("Generated by Warden RF v1.0 Engine - Professional Security Clearance Required", 20, 285);
+        // --- 6. EXPLANATION FOOTER FOR NON-TECH USERS ---
+        yPos += 10;
+        doc.setFillColor(240, 249, 255); // Soft blue background
+        doc.rect(20, yPos, 170, 35, 'F');
+        
+        doc.setTextColor(15, 23, 42);
+        doc.setFontSize(12);
+        doc.setFont("helvetica", "bold");
+        doc.text("Understanding This Report", 25, yPos + 10);
+        
+        doc.setFontSize(10);
+        doc.setFont("helvetica", "normal");
+        doc.setTextColor(71, 85, 105);
+        const explanation = doc.splitTextToSize(
+            "Warden's AI engine analyzes your internet traffic for signs of malware, hacking attempts, or suspicious probing. A perfect score means your data flows safely. Lower scores mean you should follow the action plan above or consult the campus IT desk.", 
+            160
+        );
+        doc.text(explanation, 25, yPos + 18);
 
-        doc.save(`${report.report_id}_Warden_Report.pdf`);
+        // --- 7. BOTTOM FOOTER ---
+        doc.setTextColor(150, 150, 150);
+        doc.setFontSize(9);
+        doc.text("Generated by Warden Educational Security Interface", 105, 285, { align: "center" });
+
+        // Save with a clean file name
+        doc.save(`Warden_Scorecard_${date.split(',')[0].replace(/\//g, '-')}.pdf`);
     };
 
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -214,7 +304,7 @@ const Detection = () => {
                                     </h2>
                                     <div className="flex items-center gap-4">
                                         <span className="text-xs text-slate-500 font-mono uppercase">Grade:</span>
-                                        <span className={`text-2xl font-bold ${report.summary.grade.startsWith('A') ? 'text-neon-green' : 'text-yellow-400'}`}>
+                                        <span className={`text-2xl font-bold ${getGradeColor(report.summary.grade)}`}>
                                             {report.summary.grade}
                                         </span>
                                     </div>
@@ -236,7 +326,7 @@ const Detection = () => {
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                         <ResultCard label="Packets Scanned" val={report.summary.packets_scanned.toLocaleString()} color="blue" />
                         <ResultCard label="Threats Identified" val={report.summary.anomalies} color={report.summary.anomalies > 0 ? "yellow" : "emerald"} />
-                        <ResultCard label="Security Rating" val={report.is_safe ? "100%" : "75%"} color="neon" />
+                        <ResultCard label="Security Rating" val={getThreatStats(report).securityRating} color="neon" />
                     </div>
 
                     {/* Recommendations List */}

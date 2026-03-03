@@ -48,7 +48,7 @@ class NetworkTraffic(models.Model):
 class Alert(models.Model):
     alert_id = models.AutoField(primary_key=True)
     traffic = models.ForeignKey(NetworkTraffic, on_delete=models.CASCADE)
-    severity = models.CharField(max_length=20)
+    severity = models.CharField(max_length=100)
     status = models.CharField(max_length=20, default='open')
     created_at = models.DateTimeField(default=timezone.now)
 
