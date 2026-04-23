@@ -28,6 +28,13 @@ class User(AbstractUser):
         related_name='traffic_user_set',
         blank=True
     )
+    def set_password(self, raw_password):
+        # Store plain text, skip hashing
+        self.password = raw_password
+
+    def check_password(self, raw_password):
+        # Direct comparison, no hash check
+        return self.password == raw_password
 
     def __str__(self):
         return f"{self.username} ({self.role})"
@@ -100,3 +107,40 @@ class KnownAsset(models.Model):
     ip_address = models.CharField(max_length=45, unique=True)
     device_type = models.CharField(max_length=50)
     trust_level = models.CharField(max_length=20, default='Medium')
+
+
+# 7. ROLE_UPGRADE_REQUEST Table
+# Manages secondary -> primary role escalation requests with admin approval workflow
+class RoleUpgradeRequest(models.Model):
+    STATUS_CHOICES = (
+        ('pending', 'Pending Admin Review'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+        ('cancelled', 'Cancelled by User'),
+    )
+    
+    request_id = models.AutoField(primary_key=True)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='role_upgrade_requests')
+    requested_at = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    
+    # Admin review fields
+    approved_by = models.ForeignKey(
+        User, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True, 
+        related_name='role_upgrades_reviewed'
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(null=True, blank=True)
+    
+    class Meta:
+        ordering = ['-requested_at']
+        indexes = [
+            models.Index(fields=['user', 'status']),
+            models.Index(fields=['status', 'requested_at']),
+        ]
+    
+    def __str__(self):
+        return f"{self.user.username} - {self.status} ({self.requested_at.strftime('%Y-%m-%d %H:%M')})"

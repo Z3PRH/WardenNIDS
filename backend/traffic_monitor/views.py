@@ -18,8 +18,8 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 
 # Import your local models and ML engine
 from .ml_engine import train_dynamic_model
-from .models import NetworkTraffic, Alert, FeedbackLog, KnownAsset
-from .serializers import TrafficSerializer, AlertSerializer, FeedbackSerializer, AssetSerializer
+from .models import NetworkTraffic, Alert, FeedbackLog, KnownAsset, User, RoleUpgradeRequest
+from .serializers import TrafficSerializer, AlertSerializer, FeedbackSerializer, AssetSerializer, RoleUpgradeRequestSerializer
 
 
 class TrafficViewSet(viewsets.ModelViewSet):
@@ -290,16 +290,202 @@ class ModelTrainingViewSet(viewsets.ViewSet):
         return Response({"error": result['error']}, status=500)
 
 class UpgradeRoleView(APIView):
+    """Submit a role upgrade request for admin approval (secondary users only)"""
     permission_classes = [IsAuthenticated]
+    
     def post(self, request):
         SECRET_PASSCODE = "WARDEN-ADMIN-2026"
         provided_code = request.data.get('passcode', '').strip()
-        if provided_code == SECRET_PASSCODE:
-            user = request.user
-            user.role = 'primary'
-            user.save()
-            return Response({"message": "Privileges escalated", "new_role": user.role})
-        return Response({"error": "Invalid code"}, status=403)
+        
+        if provided_code != SECRET_PASSCODE:
+            return Response({"error": "Invalid passcode"}, status=403)
+        
+        user = request.user
+        
+        # Check if user already has an active (pending or approved) request
+        existing_request = RoleUpgradeRequest.objects.filter(
+            user=user,
+            status__in=['pending', 'approved']
+        ).first()
+        
+        if existing_request:
+            if existing_request.status == 'pending':
+                return Response(
+                    {"error": "You already have a pending request. Please wait for admin approval."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            elif existing_request.status == 'approved':
+                return Response(
+                    {"error": "Your role has already been upgraded to primary."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # Create new pending request
+        upgrade_request = RoleUpgradeRequest.objects.create(
+            user=user,
+            status='pending'
+        )
+        
+        return Response({
+            "message": "Request submitted successfully. Awaiting admin approval.",
+            "request_id": upgrade_request.request_id,
+            "status": "pending"
+        }, status=status.HTTP_201_CREATED)
+
+
+class GetMyUpgradeRequestView(APIView):
+    """Get current user's role upgrade request status"""
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        upgrade_request = RoleUpgradeRequest.objects.filter(
+            user=request.user
+        ).order_by('-requested_at').first()
+        
+        if not upgrade_request:
+            return Response({"status": "none"})
+        
+        serializer = RoleUpgradeRequestSerializer(upgrade_request)
+        return Response(serializer.data)
+
+
+class AdminRoleUpprovalListView(APIView):
+    """List all pending role upgrade requests (admin only)"""
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        if request.user.role != 'Admin':
+            return Response(
+                {"error": "Admin access required"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        cutoff_date = timezone.now() - timedelta(days=7)
+        pending_requests = RoleUpgradeRequest.objects.filter(
+            status='pending',
+            requested_at__gte=cutoff_date
+        ).select_related('user').order_by('-requested_at')
+        
+        serializer = RoleUpgradeRequestSerializer(pending_requests, many=True)
+        return Response(serializer.data)
+
+
+class ApproveRoleUpgradeView(APIView):
+    """Approve a pending role upgrade request (admin only)"""
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request, request_id):
+        if request.user.role != 'Admin':
+            return Response(
+                {"error": "Admin access required"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        try:
+            upgrade_request = RoleUpgradeRequest.objects.get(request_id=request_id)
+        except RoleUpgradeRequest.DoesNotExist:
+            return Response(
+                {"error": "Request not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        if upgrade_request.status != 'pending':
+            return Response(
+                {"error": f"Cannot approve a {upgrade_request.status} request"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        upgrade_request.status = 'approved'
+        upgrade_request.approved_by = request.user
+        upgrade_request.reviewed_at = timezone.now()
+        upgrade_request.save()
+        
+        user = upgrade_request.user
+        user.role = 'primary'
+        user.save()
+        
+        serializer = RoleUpgradeRequestSerializer(upgrade_request)
+        return Response({
+            "message": "Request approved successfully",
+            "request": serializer.data
+        })
+
+
+class RejectRoleUpgradeView(APIView):
+    """Reject a pending role upgrade request (admin only)"""
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request, request_id):
+        if request.user.role != 'Admin':
+            return Response(
+                {"error": "Admin access required"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        rejection_reason = request.data.get('rejection_reason', '').strip()
+        if not rejection_reason:
+            return Response(
+                {"error": "Rejection reason is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            upgrade_request = RoleUpgradeRequest.objects.get(request_id=request_id)
+        except RoleUpgradeRequest.DoesNotExist:
+            return Response(
+                {"error": "Request not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        if upgrade_request.status != 'pending':
+            return Response(
+                {"error": f"Cannot reject a {upgrade_request.status} request"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        upgrade_request.status = 'rejected'
+        upgrade_request.approved_by = request.user
+        upgrade_request.reviewed_at = timezone.now()
+        upgrade_request.rejection_reason = rejection_reason
+        upgrade_request.save()
+        
+        serializer = RoleUpgradeRequestSerializer(upgrade_request)
+        return Response({
+            "message": "Request rejected",
+            "request": serializer.data
+        })
+
+
+class CancelRoleUpgradeView(APIView):
+    """Cancel own pending role upgrade request"""
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request, request_id):
+        try:
+            upgrade_request = RoleUpgradeRequest.objects.get(request_id=request_id)
+        except RoleUpgradeRequest.DoesNotExist:
+            return Response(
+                {"error": "Request not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        if upgrade_request.user != request.user:
+            return Response(
+                {"error": "You can only cancel your own requests"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        if upgrade_request.status != 'pending':
+            return Response(
+                {"error": f"Cannot cancel a {upgrade_request.status} request"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        upgrade_request.status = 'cancelled'
+        upgrade_request.reviewed_at = timezone.now()
+        upgrade_request.save()
+        
+        return Response({"message": "Request cancelled successfully"})
 
 
 class FeedbackViewSet(viewsets.ModelViewSet):

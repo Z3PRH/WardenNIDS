@@ -10,7 +10,8 @@ import Analytics from './analytics';
 import Training from './training';
 import Alerts from './alerts';            
 import Settings from './Settings';   
-import Detection from './Detection';         
+import Detection from './Detection';
+import AdminRoleApprovals from './components/AdminRoleApprovals';
 
 const queryClient = new QueryClient();
 
@@ -23,7 +24,7 @@ const ProtectedRoute = ({
   requiredRole 
 }: { 
   children: React.ReactNode, 
-  requiredRole?: 'primary' | 'secondary' 
+  requiredRole?: 'primary' | 'secondary' | 'Admin'
 }) => {
   const token = localStorage.getItem('token');
   const userRole = localStorage.getItem('userRole');
@@ -34,7 +35,7 @@ const ProtectedRoute = ({
 
   // RBAC Check: If a specific role is required but user doesn't match
   if (requiredRole && userRole !== requiredRole) {
-    // Primary analysts trying to go to Detection, or Secondary trying to go to Training
+    // Primary analysts trying to go to Detection, or Secondary trying to go to Training, etc.
     return <Navigate to="/dashboard" replace />;
   }
 
@@ -87,6 +88,16 @@ const App = () => {
               element={
                 <ProtectedRoute requiredRole="primary">
                   <Training />
+                </ProtectedRoute>
+              }
+            />
+
+            {/* ADMIN ONLY: Role Approval Management */}
+            <Route 
+              path="admin/role-approvals" 
+              element={
+                <ProtectedRoute requiredRole="Admin">
+                  <AdminRoleApprovals />
                 </ProtectedRoute>
               }
             />

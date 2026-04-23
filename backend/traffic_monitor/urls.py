@@ -7,6 +7,11 @@ from .views import (
     AlertViewSet, 
     block_ip,
     UpgradeRoleView,
+    GetMyUpgradeRequestView,
+    AdminRoleUpprovalListView,
+    ApproveRoleUpgradeView,
+    RejectRoleUpgradeView,
+    CancelRoleUpgradeView,
     ModelTrainingViewSet 
 )
 
@@ -26,5 +31,12 @@ urlpatterns = [
     path('block_ip/', block_ip, name='block_ip'),
     
     path('token/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
+    
+    # Role Upgrade Request Endpoints
     path('upgrade-role/', UpgradeRoleView.as_view(), name='upgrade_role'),
+    path('my-upgrade-request/', GetMyUpgradeRequestView.as_view(), name='get_my_upgrade_request'),
+    path('role-upgrade-requests/', AdminRoleUpprovalListView.as_view(), name='admin_role_approval_list'),
+    path('role-upgrade-requests/<int:request_id>/approve/', ApproveRoleUpgradeView.as_view(), name='approve_role_upgrade'),
+    path('role-upgrade-requests/<int:request_id>/reject/', RejectRoleUpgradeView.as_view(), name='reject_role_upgrade'),
+    path('role-upgrade-requests/<int:request_id>/cancel/', CancelRoleUpgradeView.as_view(), name='cancel_role_upgrade'),
 ]

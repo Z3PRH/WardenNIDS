@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import User, NetworkTraffic, Alert, MLModel, FeedbackLog, KnownAsset
+from .models import User, NetworkTraffic, Alert, MLModel, FeedbackLog, KnownAsset, RoleUpgradeRequest
 
 # 1. User Serializer
 class UserSerializer(serializers.ModelSerializer):
@@ -42,3 +42,14 @@ class AssetSerializer(serializers.ModelSerializer):
     class Meta:
         model = KnownAsset
         fields = '__all__'
+
+# 7. Role Upgrade Request Serializer
+class RoleUpgradeRequestSerializer(serializers.ModelSerializer):
+    user = UserSerializer(read_only=True)
+    approved_by = UserSerializer(read_only=True)
+    username = serializers.CharField(source='user.username', read_only=True)
+    
+    class Meta:
+        model = RoleUpgradeRequest
+        fields = ['request_id', 'user', 'username', 'requested_at', 'status', 'approved_by', 'reviewed_at', 'rejection_reason']
+        read_only_fields = ['request_id', 'user', 'requested_at', 'approved_by', 'reviewed_at', 'rejection_reason']
