@@ -3,54 +3,90 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import LiveTrafficChart from './components/LiveTrafficChart';
 import RecentAlertsTable from './components/RecentAlertsTable';
 import type { Alert } from './components/RecentAlertsTable';
-import { Shield, Activity, AlertTriangle, TrendingUp } from 'lucide-react';
-import api from './lib/api'; // Make sure this path points to your axios instance
+import { Shield, ShieldAlert, Activity, AlertTriangle, TrendingUp } from 'lucide-react';
+import api from './lib/api'; 
 
 // --- 1. INTERFACES MATCHING DJANGO ---
 
-interface TrafficPoint {
+export interface TrafficPoint {
   timestamp: string;
-  packetCount: number;
-  anomalyCount: number;
+  normalPackets: number;
+  quarantinePackets: number;
+  blockedPackets: number;
 }
 
 const fetchTrafficData = async (): Promise<TrafficPoint[]> => {
   try {
     const { data } = await api.get('/traffic/live/');
-    const traffic = data.data || [];
-    
-    // Map exactly to Django's TrafficViewSet 'live' response
-    return traffic.map((point: any) => ({
-      timestamp: point.timestamp,
-      packetCount: point.packetCount, 
-      anomalyCount: point.anomalyCount,
-    }));
+    const traffic = Array.isArray(data) ? data : [];
+    return traffic.map((point: any) => {
+      const date = new Date(point.timestamp);
+      const timeStr = date.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute:'2-digit', second:'2-digit' });
+      
+      const score = point.anomaly_score || 0;
+      const pkts = point.packet_count || 0;
+
+      return {
+        timestamp: timeStr,
+        normalPackets: score < 0.80 ? pkts : 0,
+        quarantinePackets: score >= 0.80 && score < 0.90 ? pkts : 0,
+        blockedPackets: score >= 0.90 ? pkts : 0,
+      };
+    });
   } catch (error) {
     console.error('Failed to fetch live traffic:', error);
     return [];
   }
 };
 
+// Maps the backend severity string → RecentAlertsTable threat_level enum
+const parseThreatLevel = (severity: string): Alert['threat_level'] => {
+  if (!severity) return 'Normal';
+  const s = severity.toLowerCase();
+  if (s.includes('zero-day') || s.includes('critical')) return 'Zero-Day Suspected';
+  if (s.includes('ddos') || s.includes('high') || s.includes('warning') ||
+      s.includes('known') || s.includes('signature')) return 'Known Attack';
+  return 'Normal';
+};
+
+// Priority weight for sorting — higher = shown first
+const THREAT_PRIORITY: Record<string, number> = {
+  'Zero-Day Suspected': 3,
+  'Known Attack':       2,
+  'Normal':             1,
+};
+
 const fetchAlerts = async (): Promise<Alert[]> => {
   try {
     const { data } = await api.get('/alerts/recent/');
     const alerts = data.alerts || [];
-    
-    return alerts.map((alert: any) => ({
-      id: alert.alert_id || alert.id,
-      timestamp: alert.created_at || new Date().toISOString(),
-      
-      // Pulling from the newly nested traffic object
-      src_ip: alert.traffic?.source_ip || alert.traffic?.src_ip || 'Unknown IP',
-      dst_ip: alert.traffic?.destination_ip || alert.traffic?.dst_ip || 'Unknown IP',
-      protocol: alert.traffic?.protocol || 'TCP',
-      packet_count: alert.traffic?.packet_count || 0,
-      
-      threat_level: alert.threat_level || alert.threat_type || alert.severity || 'Normal',
-      
-      // THE FIX: Provide a proper decimal so the UI renders 95% instead of 9500%
-      confidence: alert.traffic?.anomaly_score || alert.confidence || 0.95, 
-    }));
+
+    const mapped: Alert[] = alerts.map((alert: any) => {
+      const rawSeverity = alert.severity || alert.threat_level || alert.threat_type || '';
+      const confidence  = parseFloat(alert.traffic?.anomaly_score ?? alert.confidence ?? '0') || 0;
+      return {
+        id:           alert.alert_id || alert.id,
+        timestamp:    alert.created_at || new Date().toISOString(),
+        src_ip:       alert.traffic?.src_ip || alert.traffic?.source_ip || 'Unknown IP',
+        dst_ip:       alert.traffic?.dst_ip || alert.traffic?.destination_ip || 'Unknown IP',
+        protocol:     alert.traffic?.protocol || 'TCP',
+        packet_count: alert.traffic?.packet_count || 0,
+        threat_level: parseThreatLevel(rawSeverity),
+        confidence,
+        severity: rawSeverity,  // pass raw string so table can show "DDoS", "Zero-Day Anomaly" etc.
+      };
+    });
+
+    // Sort: threat priority DESC → confidence DESC → packet_count DESC
+    // This puts Zero-Day and DDoS at the top, NORMAL at the bottom
+    return mapped.sort((a, b) => {
+      const priorityDiff = (THREAT_PRIORITY[b.threat_level] ?? 1) - (THREAT_PRIORITY[a.threat_level] ?? 1);
+      if (priorityDiff !== 0) return priorityDiff;
+      const confidenceDiff = b.confidence - a.confidence;
+      if (Math.abs(confidenceDiff) > 0.01) return confidenceDiff;
+      return b.packet_count - a.packet_count;
+    });
+
   } catch (error) {
     console.error('Failed to fetch recent alerts:', error);
     return [];
@@ -58,7 +94,6 @@ const fetchAlerts = async (): Promise<Alert[]> => {
 };
 
 const blockIP = async ({ ip, alertId }: { ip: string; alertId: number }) => {
-  // Matched to the Django block_ip endpoint
   await api.post('/block_ip/', { ip, alert_id: alertId });
 };
 
@@ -70,32 +105,57 @@ const Dashboard: React.FC = () => {
   const { data: trafficData = [] } = useQuery<TrafficPoint[]>({
     queryKey: ['traffic', 'live'],
     queryFn: fetchTrafficData,
-    refetchInterval: 5000,     // Refetch every 5 seconds for the live graph effect
+    refetchInterval: 5000,     
   });
 
   const { data: alerts = [] } = useQuery<Alert[]>({
     queryKey: ['alerts', 'recent'],
     queryFn: fetchAlerts,
-    refetchInterval: 10000,    // Refetch alerts every 10 seconds
+    refetchInterval: 10000,    
   });
 
   const blockIPMutation = useMutation({
     mutationFn: blockIP,
     onSuccess: () => {
-      // Instantly refresh the table when an IP is blocked
       queryClient.invalidateQueries({ queryKey: ['alerts', 'recent'] });
     },
   });
 
-  // Stats Calculations
-  const currentPacketCount = trafficData.length > 0
-    ? trafficData[trafficData.length - 1].packetCount
+  // --- 3. DYNAMIC STAT CALCULATIONS ---
+  const latestPoint = trafficData.length > 0 ? trafficData[trafficData.length - 1] : null;
+  const currentPacketCount = latestPoint 
+    ? (latestPoint.normalPackets + latestPoint.quarantinePackets + latestPoint.blockedPackets) 
     : 0;
 
-  const totalAnomalies = alerts.filter(a => a.threat_level !== 'Normal').length;
-  // Dynamically check for high severity
-  const criticalThreats = alerts.filter(a => a.threat_level.toLowerCase().includes('ddos') || a.threat_level.toLowerCase().includes('injection')).length;
-  const activeFlows = alerts.length;
+  // Determine Dynamic Threat Status based on Live Traffic
+  let statusText = 'NORMAL';
+  let statusColor = 'text-neon-green';
+  let borderColor = 'border-neon-green/60';
+  let StatusIcon = Shield;
+  let shadowGlow = '';
+  let statusSubtext = 'Network secure';
+
+  if (latestPoint && latestPoint.blockedPackets > 0) {
+    statusText = 'CRITICAL';
+    statusColor = 'text-red-500';
+    borderColor = 'border-red-500/60';
+    StatusIcon = ShieldAlert;
+    shadowGlow = 'shadow-[0_0_20px_rgba(239,68,68,0.15)] border-red-500/30';
+    statusSubtext = 'Active threats blocked';
+  } else if (latestPoint && latestPoint.quarantinePackets > 0) {
+    statusText = 'ELEVATED';
+    statusColor = 'text-orange-500';
+    borderColor = 'border-orange-500/60';
+    StatusIcon = AlertTriangle;
+    shadowGlow = 'shadow-[0_0_20px_rgba(249,115,22,0.1)] border-orange-500/30';
+    statusSubtext = 'Suspicious flows quarantined';
+  }
+
+  // Estimate active connection flows realistically based on packet volume
+  const estimatedFlows = Math.max(0, Math.floor(currentPacketCount / 12));
+  
+  // Number of active anomalies in the immediate queue
+  const queueAnomalies = alerts.filter(a => a.threat_level !== 'Normal').length;
 
   return (
     <div className="p-8 min-h-screen bg-black">
@@ -112,27 +172,21 @@ const Dashboard: React.FC = () => {
       {/* STATS CARDS */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
         
-        {/* Threat Level Card */}
-        <div className="bg-black border border-slate-800 p-6">
+        {/* Threat Level Card (Dynamic) */}
+        <div className={`bg-black border p-6 transition-all duration-500 ${shadowGlow || 'border-slate-800'}`}>
           <div className="flex items-start justify-between mb-4">
-            <div className={`p-3 border ${
-              criticalThreats > 0 ? 'border-red-500/60' : 'border-neon-green/60'
-            }`}>
-              <Shield className={`w-6 h-6 ${
-                criticalThreats > 0 ? 'text-red-500' : 'text-neon-green'
-              }`} />
+            <div className={`p-3 border ${borderColor}`}>
+              <StatusIcon className={`w-6 h-6 ${statusColor} transition-colors`} />
             </div>
           </div>
           <p className="text-xs font-bold text-slate-600 uppercase tracking-widest mb-2">
             Threat Level
           </p>
-          <p className={`text-2xl font-bold mb-1 ${
-            criticalThreats > 0 ? 'text-red-400' : 'text-neon-green'
-          }`}>
-            {criticalThreats > 0 ? 'CRITICAL' : 'NORMAL'}
+          <p className={`text-2xl font-bold mb-1 transition-colors ${statusColor}`}>
+            {statusText}
           </p>
           <p className="text-xs font-mono text-slate-600">
-            {criticalThreats} critical alert{criticalThreats !== 1 ? 's' : ''}
+            {statusSubtext}
           </p>
         </div>
 
@@ -147,14 +201,14 @@ const Dashboard: React.FC = () => {
             Active Flows
           </p>
           <p className="text-2xl font-bold text-blue-400 mb-1">
-            {activeFlows.toLocaleString()}
+            {estimatedFlows.toLocaleString()}
           </p>
           <p className="text-xs font-mono text-slate-600">
-            monitored connections
+            estimated live connections
           </p>
         </div>
 
-        {/* Anomalies Card */}
+        {/* Anomalies Queue Card */}
         <div className="bg-black border border-slate-800 p-6">
           <div className="flex items-start justify-between mb-4">
             <div className="p-3 border border-yellow-500/60">
@@ -162,13 +216,13 @@ const Dashboard: React.FC = () => {
             </div>
           </div>
           <p className="text-xs font-bold text-slate-600 uppercase tracking-widest mb-2">
-            Anomalies
+            Alert Queue
           </p>
           <p className="text-2xl font-bold text-yellow-400 mb-1">
-            {totalAnomalies}
+            {queueAnomalies}
           </p>
           <p className="text-xs font-mono text-slate-600">
-            in recent history
+            awaiting analyst review
           </p>
         </div>
 

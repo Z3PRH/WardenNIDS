@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models import JSONField
 from django.contrib.auth.models import AbstractUser
 from django.utils import timezone
 
@@ -40,6 +41,7 @@ class NetworkTraffic(models.Model):
     byte_count = models.IntegerField()
     timestamp = models.DateTimeField(default=timezone.now)
     anomaly_score = models.FloatField(null=True, blank=True)
+    flow_features = JSONField(default=dict, blank=True)
 
     def __str__(self):
         return f"{self.src_ip} -> {self.dst_ip}"
@@ -63,6 +65,8 @@ class MLModel(models.Model):
     accuracy = models.FloatField()
     precision = models.FloatField()
     recall = models.FloatField()
+    run_id = models.CharField(max_length=50, null=True, blank=True)
+    dataset_schema = models.CharField(max_length=50, default='auto')
     f1_score = models.FloatField()
     samples_trained = models.IntegerField()
     

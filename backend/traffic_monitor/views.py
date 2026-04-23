@@ -35,35 +35,41 @@ class TrafficViewSet(viewsets.ModelViewSet):
             has_alert = Alert.objects.filter(traffic=t).exists()
             data.append({
                 "timestamp": t.timestamp,
-                "packetCount": t.packet_count, 
-                "anomalyCount": 1 if has_alert else 0
+                "packet_count": t.packet_count,
+                "byte_count": t.byte_count,
+                "anomaly_score": t.anomaly_score,
+                "has_alert": has_alert
             })
-        return Response({"data": data})
+        return Response(data)
 
     @action(detail=False, methods=['get'])
     def stats(self, request):
         now = timezone.now()
         historical_threshold = now - timedelta(hours=24)
-        live_threshold = now - timedelta(seconds=10) 
+        
+        # FIX 1: Increased from 10s to 60s for a stable, continuous live feed
+        live_threshold = now - timedelta(seconds=60) 
 
-        # 1. LIVE DATA (With Future Ghost Packet Fix)
-        # Filters strictly between 10s ago and exactly 'now'
+        # 1. LIVE DATA
         live_traffic_qs = NetworkTraffic.objects.filter(timestamp__gte=live_threshold, timestamp__lte=now)
         live_alerts_qs = Alert.objects.filter(created_at__gte=live_threshold, created_at__lte=now)
 
         live_total = live_traffic_qs.count()
-        live_zero_day = live_alerts_qs.filter(severity__icontains='unknown').count()
-        live_quarantined = live_alerts_qs.filter(status__icontains='quarantined').exclude(severity__icontains='unknown').count()
-        live_blocked = live_alerts_qs.exclude(severity__icontains='unknown').exclude(status__icontains='quarantined').count()
+        
+        # FIX 2: Look for 'zero-day' instead of 'unknown' to match the generator's new labels
+        live_zero_day = live_alerts_qs.filter(severity__icontains='zero-day').count()
+        live_quarantined = live_alerts_qs.filter(status__icontains='quarantined').exclude(severity__icontains='zero-day').count()
+        live_blocked = live_alerts_qs.exclude(severity__icontains='zero-day').exclude(status__icontains='quarantined').count()
+        
         live_normal = max(0, live_total - (live_zero_day + live_quarantined + live_blocked))
 
         # 2. HISTORICAL DATA (Last 24 Hours)
         hist_alerts_qs = Alert.objects.filter(created_at__gte=historical_threshold, created_at__lte=now)
         hist_traffic_total = NetworkTraffic.objects.filter(timestamp__gte=historical_threshold, timestamp__lte=now).count()
         
-        hist_zero = hist_alerts_qs.filter(severity__icontains='unknown').count()
-        hist_quar = hist_alerts_qs.filter(status__icontains='quarantined').exclude(severity__icontains='unknown').count()
-        hist_block = hist_alerts_qs.exclude(severity__icontains='unknown').exclude(status__icontains='quarantined').count()
+        hist_zero = hist_alerts_qs.filter(severity__icontains='zero-day').count()
+        hist_quar = hist_alerts_qs.filter(status__icontains='quarantined').exclude(severity__icontains='zero-day').count()
+        hist_block = hist_alerts_qs.exclude(severity__icontains='zero-day').exclude(status__icontains='quarantined').count()
         hist_norm = max(0, hist_traffic_total - (hist_zero + hist_quar + hist_block))
 
         distribution = [
@@ -271,9 +277,16 @@ class ModelTrainingViewSet(viewsets.ViewSet):
         if 'file' not in request.FILES:
             return Response({"error": "No file uploaded"}, status=400)
         csv_file = request.FILES['file']
-        result = train_dynamic_model(csv_file)
+        dataset_type = request.POST.get('dataset_type', 'auto')  # Read schema hint from frontend dropdown
+        result = train_dynamic_model(csv_file, dataset_type=dataset_type)
         if result['success']:
-            return Response({"message": "Model trained", "metrics": result['metrics']}, status=200)
+            return Response({
+                "message": "Model trained",
+                "metrics": result['metrics'],
+                "run_id": result.get('run_id'),
+                "dataset_schema": result.get('dataset_schema'),
+                "schema_warning": result.get('schema_warning'),  # None if no mismatch
+            }, status=200)
         return Response({"error": result['error']}, status=500)
 
 class UpgradeRoleView(APIView):

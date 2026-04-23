@@ -25,6 +25,7 @@ export interface Alert {
   packet_count: number;
   threat_level: 'Normal' | 'Known Attack' | 'Zero-Day Suspected';
   confidence: number;
+  severity?: string; // raw backend severity string for display label
 }
 
 interface RecentAlertsTableProps {
@@ -39,14 +40,25 @@ const RecentAlertsTable: React.FC<RecentAlertsTableProps> = ({
   const [blockingIPs, setBlockingIPs] = useState<Set<string>>(new Set());
   const [blockedIPs, setBlockedIPs] = useState<Set<string>>(new Set());
 
-  const getThreatBadge = (threatLevel: string, confidence: number) => {
+  // Extract human-readable attack type from raw severity string
+  // e.g. "High | DDoS | Synthetic" → "DDoS"
+  const parseAttackLabel = (severity?: string): string | null => {
+    if (!severity) return null;
+    const parts = severity.split('|').map(s => s.trim());
+    // Middle part is the attack type
+    return parts.length >= 2 ? parts[1] : null;
+  };
+
+  const getThreatBadge = (threatLevel: string, confidence: number, severity?: string) => {
+    const attackLabel = parseAttackLabel(severity);
+
     switch (threatLevel) {
       case 'Zero-Day Suspected':
         return (
           <div className="flex items-center gap-2">
             <span className="px-3 py-1 border border-red-500/60 text-red-400 bg-red-500/10 text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5">
               <ShieldAlert className="w-3 h-3" />
-              CRITICAL
+              {attackLabel || 'ZERO-DAY'}
             </span>
             <span className="text-xs font-mono text-red-400">
               {(confidence * 100).toFixed(0)}%
@@ -58,7 +70,7 @@ const RecentAlertsTable: React.FC<RecentAlertsTableProps> = ({
           <div className="flex items-center gap-2">
             <span className="px-3 py-1 border border-yellow-500/60 text-yellow-400 bg-yellow-500/10 text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5">
               <ShieldAlert className="w-3 h-3" />
-              WARNING
+              {attackLabel || 'KNOWN ATTACK'}
             </span>
             <span className="text-xs font-mono text-yellow-400">
               {(confidence * 100).toFixed(0)}%
@@ -199,7 +211,13 @@ const RecentAlertsTable: React.FC<RecentAlertsTableProps> = ({
                 return (
                   <TableRow 
                     key={alert.id}
-                    className="border-slate-800 hover:bg-slate-900/20 transition-colors"
+                    className={`border-slate-800 transition-colors ${
+                      alert.threat_level === 'Zero-Day Suspected'
+                        ? 'bg-red-950/10 hover:bg-red-950/20 border-l-2 border-l-red-500'
+                        : alert.threat_level === 'Known Attack'
+                        ? 'bg-yellow-950/10 hover:bg-yellow-950/20 border-l-2 border-l-yellow-500'
+                        : 'hover:bg-slate-900/20'
+                    }`}
                   >
                     <TableCell className="font-mono text-xs text-slate-400">
                       {formatTimestamp(alert.timestamp)}
@@ -219,7 +237,7 @@ const RecentAlertsTable: React.FC<RecentAlertsTableProps> = ({
                       {alert.packet_count.toLocaleString()}
                     </TableCell>
                     <TableCell>
-                      {getThreatBadge(alert.threat_level, alert.confidence)}
+                      {getThreatBadge(alert.threat_level, alert.confidence, alert.severity)}
                     </TableCell>
                     <TableCell className="text-center">
                       {isBlocked ? (
