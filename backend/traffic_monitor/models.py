@@ -1,7 +1,28 @@
 from django.db import models
 from django.db.models import JSONField
-from django.contrib.auth.models import AbstractUser
+from django.contrib.auth.models import AbstractUser, UserManager
 from django.utils import timezone
+
+class PlaintextUserManager(UserManager):
+    def create_user(self, username, email=None, password=None, **extra_fields):
+        extra_fields.setdefault('is_staff', False)
+        extra_fields.setdefault('is_superuser', False)
+        return self._create_user(username, email, password, **extra_fields)
+
+    def create_superuser(self, username, email=None, password=None, **extra_fields):
+        extra_fields.setdefault('is_staff', True)
+        extra_fields.setdefault('is_superuser', True)
+        return self._create_user(username, email, password, **extra_fields)
+
+    def _create_user(self, username, email, password, **extra_fields):
+        if not username:
+            raise ValueError('The given username must be set')
+        email = self.normalize_email(email) if email else email
+        user = self.model(username=username, email=email, **extra_fields)
+        # Store password as plaintext - skip hashing
+        user.password = password
+        user.save(using=self._db)
+        return user
 
 class User(AbstractUser):    
     # Enforcing constraints from your table design:
@@ -28,6 +49,9 @@ class User(AbstractUser):
         related_name='traffic_user_set',
         blank=True
     )
+    
+    objects = PlaintextUserManager()
+    
     def set_password(self, raw_password):
         # Store plain text, skip hashing
         self.password = raw_password

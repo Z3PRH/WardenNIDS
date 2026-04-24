@@ -19,7 +19,77 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 # Import your local models and ML engine
 from .ml_engine import train_dynamic_model
 from .models import NetworkTraffic, Alert, FeedbackLog, KnownAsset, User, RoleUpgradeRequest
-from .serializers import TrafficSerializer, AlertSerializer, FeedbackSerializer, AssetSerializer, RoleUpgradeRequestSerializer
+from .serializers import TrafficSerializer, AlertSerializer, FeedbackSerializer, AssetSerializer, RoleUpgradeRequestSerializer, UserSerializer
+
+
+# ==========================================
+# REGISTER ENDPOINT
+# ==========================================
+@api_view(['POST'])
+def register(request):
+    """
+    Register a new user.
+    Expected fields: username, email, password
+    Returns: 201 with user data, or 400 with validation errors
+    """
+    username = request.data.get('username', '').strip()
+    email = request.data.get('email', '').strip()
+    password = request.data.get('password', '').strip()
+    
+    # Validation
+    errors = {}
+    
+    # Username validation
+    if not username:
+        errors['username'] = ['Username is required.']
+    elif len(username) < 3:
+        errors['username'] = ['Username must be at least 3 characters.']
+    elif len(username) > 150:
+        errors['username'] = ['Username must be 150 characters or less.']
+    elif User.objects.filter(username=username).exists():
+        errors['username'] = ['Username already exists.']
+    
+    # Email validation
+    if not email:
+        errors['email'] = ['Email is required.']
+    elif len(email) > 100:
+        errors['email'] = ['Email must be 100 characters or less.']
+    elif '@' not in email or '.' not in email:
+        errors['email'] = ['Enter a valid email address.']
+    elif User.objects.filter(email=email).exists():
+        errors['email'] = ['Email already registered.']
+    
+    # Password validation
+    if not password:
+        errors['password'] = ['Password is required.']
+    elif len(password) < 6:
+        errors['password'] = ['Password must be at least 6 characters.']
+    elif len(password) > 128:
+        errors['password'] = ['Password must be 128 characters or less.']
+    
+    if errors:
+        return Response(errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Create user
+    try:
+        user = User.objects.create(
+            username=username,
+            email=email,
+            password=password,  # Plain text (no hashing)
+            role='secondary',   # Default role
+            is_staff=False,
+            is_superuser=False
+        )
+        serializer = UserSerializer(user)
+        return Response({
+            "message": "User registered successfully.",
+            "user": serializer.data
+        }, status=status.HTTP_201_CREATED)
+    except Exception as e:
+        return Response(
+            {"error": str(e)},
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
 
 class TrafficViewSet(viewsets.ModelViewSet):
@@ -302,23 +372,24 @@ class UpgradeRoleView(APIView):
         
         user = request.user
         
-        # Check if user already has an active (pending or approved) request
+        # If user is already primary, they don't need to request
+        if user.role == 'primary':
+            return Response(
+                {"error": "You already have primary analyst access."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if user already has a PENDING request only
         existing_request = RoleUpgradeRequest.objects.filter(
             user=user,
-            status__in=['pending', 'approved']
+            status='pending'
         ).first()
         
         if existing_request:
-            if existing_request.status == 'pending':
-                return Response(
-                    {"error": "You already have a pending request. Please wait for admin approval."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            elif existing_request.status == 'approved':
-                return Response(
-                    {"error": "Your role has already been upgraded to primary."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+            return Response(
+                {"error": "You already have a pending request. Please wait for admin approval."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         # Create new pending request
         upgrade_request = RoleUpgradeRequest.objects.create(
@@ -349,14 +420,28 @@ class GetMyUpgradeRequestView(APIView):
         return Response(serializer.data)
 
 
+class GetMyUpgradeRequestHistoryView(APIView):
+    """Get all past role upgrade requests for current user"""
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        # Get all requests for this user, newest first
+        upgrade_requests = RoleUpgradeRequest.objects.filter(
+            user=request.user
+        ).order_by('-requested_at')
+        
+        serializer = RoleUpgradeRequestSerializer(upgrade_requests, many=True)
+        return Response(serializer.data)
+
+
 class AdminRoleUpprovalListView(APIView):
     """List all pending role upgrade requests (admin only)"""
     permission_classes = [IsAuthenticated]
     
     def get(self, request):
-        if request.user.role != 'Admin':
+        if request.user.role != 'primary':
             return Response(
-                {"error": "Admin access required"},
+                {"error": "Primary analyst access required"},
                 status=status.HTTP_403_FORBIDDEN
             )
         
@@ -375,9 +460,9 @@ class ApproveRoleUpgradeView(APIView):
     permission_classes = [IsAuthenticated]
     
     def post(self, request, request_id):
-        if request.user.role != 'Admin':
+        if request.user.role != 'primary':
             return Response(
-                {"error": "Admin access required"},
+                {"error": "Primary analyst access required"},
                 status=status.HTTP_403_FORBIDDEN
             )
         
@@ -416,9 +501,9 @@ class RejectRoleUpgradeView(APIView):
     permission_classes = [IsAuthenticated]
     
     def post(self, request, request_id):
-        if request.user.role != 'Admin':
+        if request.user.role != 'primary':
             return Response(
-                {"error": "Admin access required"},
+                {"error": "Primary analyst access required"},
                 status=status.HTTP_403_FORBIDDEN
             )
         

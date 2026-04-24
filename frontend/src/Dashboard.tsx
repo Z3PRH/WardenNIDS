@@ -1,9 +1,9 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import LiveTrafficChart from './components/LiveTrafficChart';
 import RecentAlertsTable from './components/RecentAlertsTable';
 import type { Alert } from './components/RecentAlertsTable';
-import { Shield, ShieldAlert, Activity, AlertTriangle, TrendingUp } from 'lucide-react';
+import { Shield, ShieldAlert, Activity, AlertTriangle, TrendingUp, Bell, CheckCircle, X, Clock } from 'lucide-react';
 import api from './lib/api'; 
 
 // --- 1. INTERFACES MATCHING DJANGO ---
@@ -13,6 +13,13 @@ export interface TrafficPoint {
   normalPackets: number;
   quarantinePackets: number;
   blockedPackets: number;
+}
+
+interface UpgradeRequest {
+  request_id: number;
+  username: string;
+  requested_at: string;
+  status: string;
 }
 
 const fetchTrafficData = async (): Promise<TrafficPoint[]> => {
@@ -35,6 +42,17 @@ const fetchTrafficData = async (): Promise<TrafficPoint[]> => {
     });
   } catch (error) {
     console.error('Failed to fetch live traffic:', error);
+    return [];
+  }
+};
+
+// Fetch pending role upgrade requests (admin/primary only)
+const fetchPendingRequests = async (): Promise<UpgradeRequest[]> => {
+  try {
+    const { data } = await api.get('/role-upgrade-requests/');
+    return data || [];
+  } catch (error) {
+    console.error('Failed to fetch pending requests:', error);
     return [];
   }
 };
@@ -73,12 +91,10 @@ const fetchAlerts = async (): Promise<Alert[]> => {
         packet_count: alert.traffic?.packet_count || 0,
         threat_level: parseThreatLevel(rawSeverity),
         confidence,
-        severity: rawSeverity,  // pass raw string so table can show "DDoS", "Zero-Day Anomaly" etc.
+        severity: rawSeverity,
       };
     });
 
-    // Sort: threat priority DESC → confidence DESC → packet_count DESC
-    // This puts Zero-Day and DDoS at the top, NORMAL at the bottom
     return mapped.sort((a, b) => {
       const priorityDiff = (THREAT_PRIORITY[b.threat_level] ?? 1) - (THREAT_PRIORITY[a.threat_level] ?? 1);
       if (priorityDiff !== 0) return priorityDiff;
@@ -97,15 +113,115 @@ const blockIP = async ({ ip, alertId }: { ip: string; alertId: number }) => {
   await api.post('/block_ip/', { ip, alert_id: alertId });
 };
 
-// --- 2. MAIN DASHBOARD COMPONENT ---
+// --- 2. PENDING REQUESTS PANEL COMPONENT ---
+
+interface PendingRequestsPanelProps {
+  requests: UpgradeRequest[];
+  onApprove: (requestId: number) => Promise<void>;
+  onReject: (requestId: number) => Promise<void>;
+  isLoading: boolean;
+}
+
+const PendingRequestsPanel: React.FC<PendingRequestsPanelProps> = ({ requests, onApprove, onReject, isLoading }) => {
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [rejectReason, setRejectReason] = useState<Record<number, string>>({});
+
+  if (requests.length === 0) return null;
+
+  return (
+    <div className="bg-slate-900/50 border border-blue-500/40 p-6 rounded-lg mb-8 backdrop-blur-sm">
+      <div className="flex items-center gap-3 mb-6">
+        <div className="relative">
+          <Bell className="w-6 h-6 text-blue-400" />
+          <div className="absolute -top-1 -right-2 bg-blue-500 text-white text-xs font-bold w-5 h-5 rounded-full flex items-center justify-center">
+            {requests.length}
+          </div>
+        </div>
+        <h2 className="text-lg font-bold text-blue-400 uppercase tracking-wide">
+          Pending Role Upgrade Requests
+        </h2>
+      </div>
+
+      <div className="space-y-3">
+        {requests.map((req) => (
+          <div key={req.request_id} className="bg-slate-800/50 border border-slate-700 p-4 rounded">
+            <div className="flex items-center justify-between">
+              <div className="flex-1">
+                <p className="font-mono text-white font-bold">{req.username}</p>
+                <p className="text-xs text-slate-400 mt-1">
+                  Requested: {new Date(req.requested_at).toLocaleString()}
+                </p>
+              </div>
+              <button
+                onClick={() => setExpandedId(expandedId === req.request_id ? null : req.request_id)}
+                className="text-blue-400 hover:text-blue-300 text-sm font-mono transition-colors"
+              >
+                {expandedId === req.request_id ? 'Hide' : 'Actions'}
+              </button>
+            </div>
+
+            {expandedId === req.request_id && (
+              <div className="mt-4 pt-4 border-t border-slate-700 space-y-3">
+                <div className="bg-slate-900 p-3 rounded border border-slate-700">
+                  <p className="text-xs text-slate-400 font-mono mb-2">REJECTION REASON (if rejecting):</p>
+                  <textarea
+                    data-request-id={req.request_id}
+                    data-type="rejection"
+                    value={rejectReason[req.request_id] || ''}
+                    onChange={(e) => setRejectReason({ ...rejectReason, [req.request_id]: e.target.value })}
+                    placeholder="Explain why this request is being rejected..."
+                    className="w-full bg-black border border-slate-700 p-2 text-slate-100 text-xs font-mono rounded focus:border-red-500 focus:outline-none"
+                    rows={2}
+                  />
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => onApprove(req.request_id)}
+                    disabled={isLoading}
+                    className="flex-1 bg-green-600 hover:bg-green-700 text-white font-mono text-sm py-2 rounded transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                    <CheckCircle className="w-4 h-4" />
+                    Approve
+                  </button>
+                  <button
+                    onClick={() => onReject(req.request_id)}
+                    disabled={isLoading || !rejectReason[req.request_id]?.trim()}
+                    className="flex-1 bg-red-600 hover:bg-red-700 text-white font-mono text-sm py-2 rounded transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                    <X className="w-4 h-4" />
+                    Reject
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// --- 3. MAIN DASHBOARD COMPONENT ---
 
 const Dashboard: React.FC = () => {
   const queryClient = useQueryClient();
+  const userRole = localStorage.getItem('userRole');
+  const isPrimary = userRole === 'primary';
+  const isAdmin = userRole === 'Admin';
+  const canApproveRequests = isPrimary || isAdmin;
 
   const { data: trafficData = [] } = useQuery<TrafficPoint[]>({
     queryKey: ['traffic', 'live'],
     queryFn: fetchTrafficData,
     refetchInterval: 5000,     
+  });
+
+  const { data: pendingRequests = [] } = useQuery<UpgradeRequest[]>({
+    queryKey: ['upgrade-requests', 'pending'],
+    queryFn: fetchPendingRequests,
+    refetchInterval: 15000,
+    enabled: canApproveRequests, // Only fetch if user can approve
   });
 
   const { data: alerts = [] } = useQuery<Alert[]>({
@@ -121,13 +237,39 @@ const Dashboard: React.FC = () => {
     },
   });
 
-  // --- 3. DYNAMIC STAT CALCULATIONS ---
+  const approveMutation = useMutation({
+    mutationFn: (requestId: number) => api.post(`/role-upgrade-requests/${requestId}/approve/`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['upgrade-requests', 'pending'] });
+      alert('Request approved successfully!');
+    },
+    onError: (error: any) => {
+      const message = error.response?.data?.error || error.message || 'Failed to approve request';
+      console.error('Approve error:', message);
+      alert(`Error: ${message}`);
+    },
+  });
+
+  const rejectMutation = useMutation({
+    mutationFn: ({ requestId, reason }: { requestId: number; reason: string }) =>
+      api.post(`/role-upgrade-requests/${requestId}/reject/`, { rejection_reason: reason }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['upgrade-requests', 'pending'] });
+      alert('Request rejected successfully!');
+    },
+    onError: (error: any) => {
+      const message = error.response?.data?.error || error.message || 'Failed to reject request';
+      console.error('Reject error:', message);
+      alert(`Error: ${message}`);
+    },
+  });
+
+  // --- DYNAMIC STAT CALCULATIONS ---
   const latestPoint = trafficData.length > 0 ? trafficData[trafficData.length - 1] : null;
   const currentPacketCount = latestPoint 
     ? (latestPoint.normalPackets + latestPoint.quarantinePackets + latestPoint.blockedPackets) 
     : 0;
 
-  // Determine Dynamic Threat Status based on Live Traffic
   let statusText = 'NORMAL';
   let statusColor = 'text-neon-green';
   let borderColor = 'border-neon-green/60';
@@ -151,10 +293,7 @@ const Dashboard: React.FC = () => {
     statusSubtext = 'Suspicious flows quarantined';
   }
 
-  // Estimate active connection flows realistically based on packet volume
   const estimatedFlows = Math.max(0, Math.floor(currentPacketCount / 12));
-  
-  // Number of active anomalies in the immediate queue
   const queueAnomalies = alerts.filter(a => a.threat_level !== 'Normal').length;
 
   return (
@@ -169,10 +308,38 @@ const Dashboard: React.FC = () => {
         </p>
       </div>
 
+      {/* PENDING REQUESTS PANEL (Primary/Admin only) */}
+      {canApproveRequests && pendingRequests.length > 0 && (
+        <PendingRequestsPanel
+          requests={pendingRequests}
+          onApprove={async (requestId) => {
+            try {
+              await approveMutation.mutateAsync(requestId);
+            } catch (error) {
+              console.error('Error approving request:', error);
+            }
+          }}
+          onReject={async (requestId) => {
+            try {
+              const textarea = document.querySelector(`textarea[data-request-id="${requestId}"]`) as HTMLTextAreaElement;
+              const reason = textarea?.value?.trim();
+              if (!reason) {
+                alert('Please provide a rejection reason');
+                return;
+              }
+              await rejectMutation.mutateAsync({ requestId, reason });
+            } catch (error) {
+              console.error('Error rejecting request:', error);
+            }
+          }}
+          isLoading={approveMutation.isPending || rejectMutation.isPending}
+        />
+      )}
+
       {/* STATS CARDS */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
         
-        {/* Threat Level Card (Dynamic) */}
+        {/* Threat Level Card */}
         <div className={`bg-black border p-6 transition-all duration-500 ${shadowGlow || 'border-slate-800'}`}>
           <div className="flex items-start justify-between mb-4">
             <div className={`p-3 border ${borderColor}`}>
