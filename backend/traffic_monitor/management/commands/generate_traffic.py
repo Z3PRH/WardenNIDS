@@ -1,22 +1,28 @@
 import time
 import random
 import numpy as np
+import socket
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 from traffic_monitor.models import NetworkTraffic, Alert
 
 # ---------------------------------------------------------------------------
-# Warden Live Traffic Simulator
-# Usage:
-#   python manage.py generate_traffic              # runs forever
-#   python manage.py generate_traffic --limit 500  # stops after 500 flows
-#   python manage.py generate_traffic --interval 2 # 1 flow every 2 seconds
-#   python manage.py generate_traffic --burst       # fast mode, no sleep
-#
-# NOTE: The generator always uses synthetic anomaly scores so the dashboard
-# works even before a model is trained. Once a model is trained, ML inference
-# takes over and overrides the synthetic scores.
+# Warden Live Traffic Simulator - PRESENTATION MODE
+# Automatically detects your presentation laptop's IP and targets it.
 # ---------------------------------------------------------------------------
+
+# --- NEW: AUTO-DETECT YOUR LAPTOP IP ---
+def get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80)) # Connects to Google DNS just to see which network interface we use
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "192.168.1.50" # Fallback if no internet
+
+MY_LAPTOP_IP = get_local_ip()
 
 TRAFFIC_WEIGHTS = {
     'benign':        0.70,
@@ -25,11 +31,10 @@ TRAFFIC_WEIGHTS = {
     'falsepositive': 0.10,
 }
 
-INTERNAL_IPS = [f"192.168.1.{i}" for i in range(2, 50)]
-EXTERNAL_IPS = [f"203.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}"
-                for _ in range(100)]
-ATTACK_IPS   = [f"45.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}"
-                for _ in range(30)]
+# The "Internal" network is now mostly your laptop, plus a couple fake background devices
+INTERNAL_IPS = [MY_LAPTOP_IP, MY_LAPTOP_IP, "192.168.1.100", "192.168.1.101"]
+EXTERNAL_IPS = [f"203.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}" for _ in range(100)]
+ATTACK_IPS   = [f"45.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}" for _ in range(30)]
 
 WEB_PORTS  = [80, 443, 8080, 8443]
 DNS_PORTS  = [53]
@@ -48,12 +53,12 @@ def gen_benign():
     pkt_min  = int(np.random.uniform(0, 100))
     pkt_mean = round(np.random.uniform(pkt_min, pkt_max), 2)
     return {
-        'src_ip':       random.choice(INTERNAL_IPS),
+        'src_ip':       MY_LAPTOP_IP if random.random() > 0.5 else random.choice(INTERNAL_IPS),
         'dst_ip':       random.choice(EXTERNAL_IPS),
         'protocol':     random.choice(['TCP', 'UDP', 'HTTPS', 'DNS']),
         'packet_count': fwd_pkts + bwd_pkts,
         'byte_count':   fwd_len,
-        'anomaly_score': round(random.uniform(0.05, 0.35), 4),  # clearly safe
+        'anomaly_score': round(random.uniform(0.05, 0.35), 4),
         'flow_features': {
             'Destination Port': port, 'Flow Duration': duration,
             'Total Fwd Packets': fwd_pkts, 'Total Backward Packets': bwd_pkts,
@@ -77,11 +82,11 @@ def gen_ddos():
     pkt_mean = round(np.random.uniform(800, 1400), 2)
     return {
         'src_ip':       random.choice(ATTACK_IPS),
-        'dst_ip':       random.choice(INTERNAL_IPS),
+        'dst_ip':       MY_LAPTOP_IP, # Guaranteed to target your presentation laptop
         'protocol':     random.choice(['TCP', 'UDP', 'HTTP']),
         'packet_count': fwd_pkts + bwd_pkts,
         'byte_count':   fwd_len,
-        'anomaly_score': round(random.uniform(0.90, 0.99), 4),  # always triggers blocked
+        'anomaly_score': round(random.uniform(0.90, 0.99), 4),
         'flow_features': {
             'Destination Port': port, 'Flow Duration': duration,
             'Total Fwd Packets': fwd_pkts, 'Total Backward Packets': bwd_pkts,
@@ -105,11 +110,11 @@ def gen_zeroday():
     pkt_mean = round(np.random.uniform(200, 600), 2)
     return {
         'src_ip':       random.choice(ATTACK_IPS + EXTERNAL_IPS),
-        'dst_ip':       random.choice(INTERNAL_IPS),
+        'dst_ip':       MY_LAPTOP_IP, # Guaranteed to target your presentation laptop
         'protocol':     random.choice(['TCP', 'UDP', 'ICMP']),
         'packet_count': fwd_pkts + bwd_pkts,
         'byte_count':   fwd_len,
-        'anomaly_score': round(random.uniform(0.80, 0.89), 4),  # quarantine range
+        'anomaly_score': round(random.uniform(0.80, 0.89), 4),
         'flow_features': {
             'Destination Port': port, 'Flow Duration': duration,
             'Total Fwd Packets': fwd_pkts, 'Total Backward Packets': bwd_pkts,
@@ -132,12 +137,12 @@ def gen_false_positive():
     pkt_min  = int(np.random.uniform(40, 200))
     pkt_mean = round(np.random.uniform(400, 900), 2)
     return {
-        'src_ip':       random.choice(INTERNAL_IPS),
+        'src_ip':       MY_LAPTOP_IP,
         'dst_ip':       random.choice(EXTERNAL_IPS),
         'protocol':     random.choice(['TCP', 'HTTPS', 'UDP']),
         'packet_count': fwd_pkts + bwd_pkts,
         'byte_count':   fwd_len,
-        'anomaly_score': round(random.uniform(0.80, 0.88), 4),  # quarantine range — suspicious but legit
+        'anomaly_score': round(random.uniform(0.80, 0.88), 4), 
         'flow_features': {
             'Destination Port': port, 'Flow Duration': duration,
             'Total Fwd Packets': fwd_pkts, 'Total Backward Packets': bwd_pkts,
@@ -174,19 +179,15 @@ class Command(BaseCommand):
     help = 'Continuously generate synthetic network traffic flows into the database'
 
     def add_arguments(self, parser):
-        parser.add_argument('--limit', type=int, default=0,
-            help='Stop after N flows. Default 0 = run forever.')
-        parser.add_argument('--interval', type=float, default=1.0,
-            help='Seconds between each flow. Default 1.0')
-        parser.add_argument('--burst', action='store_true',
-            help='No sleep between flows — insert as fast as possible.')
+        parser.add_argument('--limit', type=int, default=0, help='Stop after N flows. Default 0 = run forever.')
+        parser.add_argument('--interval', type=float, default=1.0, help='Seconds between each flow. Default 1.0')
+        parser.add_argument('--burst', action='store_true', help='No sleep between flows.')
 
     def handle(self, *args, **options):
         limit    = options['limit']
         interval = options['interval']
         burst    = options['burst']
 
-        # Import here to avoid circular import issues at module load time
         from traffic_monitor.ml_engine import load_and_predict
 
         pool    = list(GENERATORS.keys())
@@ -194,13 +195,9 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS(
             "\n" + "="*55 +
-            "\n  Warden Live Traffic Simulator — ACTIVE" +
-            f"\n  Mix: {int(TRAFFIC_WEIGHTS['benign']*100)}% benign | "
-            f"{int(TRAFFIC_WEIGHTS['ddos']*100)}% DDoS | "
-            f"{int(TRAFFIC_WEIGHTS['zeroday']*100)}% zero-day | "
-            f"{int(TRAFFIC_WEIGHTS['falsepositive']*100)}% false-positive" +
+            "\n  Warden Live Traffic Simulator — PRESENTATION MODE" +
+            f"\n  TARGET IP DETECTED: {MY_LAPTOP_IP}" +
             f"\n  Interval: {'burst mode' if burst else f'{interval}s'}" +
-            f"\n  Limit: {'unlimited' if limit == 0 else limit}" +
             "\n  Press Ctrl+C to stop.\n" +
             "="*55
         ))
@@ -218,31 +215,27 @@ class Command(BaseCommand):
                 flow_features = data.pop('flow_features')
                 synthetic_score = data['anomaly_score']
 
-                # Save to DB with synthetic score first
                 traffic = NetworkTraffic.objects.create(
                     **data,
                     flow_features=flow_features,
                     timestamp=timezone.now(),
                 )
 
-                # Try ML inference — override synthetic score if model is available
                 final_score  = synthetic_score
                 source       = 'Synthetic'
                 ml_available = False
 
                 try:
                     ml_score, ml_source = load_and_predict(flow_features)
-                    if ml_score > 0.0:  # 0.0 means model not trained yet
+                    if ml_score > 0.0:
                         final_score  = ml_score
                         source       = ml_source
                         ml_available = True
-                        # Update the record with the real ML score
                         traffic.anomaly_score = final_score
                         traffic.save(update_fields=['anomaly_score'])
                 except Exception:
-                    pass  # Model not ready — synthetic score stays
+                    pass
 
-                # Create alert for non-benign traffic
                 if traffic_type != 'benign':
                     Alert.objects.create(
                         traffic=traffic,

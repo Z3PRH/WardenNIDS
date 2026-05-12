@@ -35,10 +35,20 @@ const LoginPage = () => {
 
   const handleLogin = async () => {
     const response = await api.post('/token/', { username, password });
+    
+    // Get the role from your backend (which we fixed to return 'Admin' for superusers)
+    const assignedRole = response.data.role || 'secondary';
+    
     localStorage.setItem('token', response.data.access);
-    localStorage.setItem('userRole', response.data.role || 'secondary');
-    console.log("Login Successful! Role assigned:", response.data.role || 'secondary');
-    navigate('/dashboard');
+    localStorage.setItem('userRole', assignedRole);
+
+    if (assignedRole === 'Admin' || assignedRole === 'admin') {
+      // Redirect master account directly to the Approvals page
+      navigate('/admin/role-approvals');
+    } else {
+      // Everyone else goes to the dashboard
+      navigate('/dashboard');
+    }
   };
 
   const handleRegister = async () => {

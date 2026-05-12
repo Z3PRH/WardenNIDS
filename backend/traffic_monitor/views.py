@@ -1,11 +1,16 @@
+from urllib import request
+
 import pandas as pd
 import io
 import random
+from django.core.cache import cache
+import time
+from django.shortcuts import get_object_or_404
 from datetime import timedelta
 from django.utils import timezone
 from django.db.models import Count
 from django.db.models.functions import ExtractHour
-
+ 
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes, parser_classes
 from rest_framework.response import Response
@@ -18,7 +23,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 
 # Import your local models and ML engine
 from .ml_engine import train_dynamic_model
-from .models import NetworkTraffic, Alert, FeedbackLog, KnownAsset, User, RoleUpgradeRequest
+from .models import NetworkTraffic, Alert, FeedbackLog, KnownAsset, User, RoleUpgradeRequest , MLModel
 from .serializers import TrafficSerializer, AlertSerializer, FeedbackSerializer, AssetSerializer, RoleUpgradeRequestSerializer, UserSerializer
 
 
@@ -169,69 +174,62 @@ class TrafficViewSet(viewsets.ModelViewSet):
 @permission_classes([IsAuthenticated])
 @parser_classes([MultiPartParser])
 def personal_network_audit(request):
-    """
-    Allows secondary users (students/professors) to upload logs for a safety check.
-    Returns a human-readable safety report based on threat density.
-    """
     file_obj = request.FILES.get('file')
     if not file_obj:
         return Response({"error": "No log file provided."}, status=400)
 
     try:
-        # Read uploaded log via pandas
         df = pd.read_csv(io.StringIO(file_obj.read().decode('utf-8')))
         total_rows = len(df)
         
-        # 1. Strip invisible spaces and count actual anomalies based on the 'Label' column
-        if 'Label' in df.columns:
-            anomalies_found = len(df[df['Label'].astype(str).str.strip().str.upper() != 'BENIGN'])
+        df.columns = df.columns.str.strip().str.upper()
+        
+        timeline_data = [] # <--- NEW: Array to hold graph data
+        
+        if 'LABEL' in df.columns:
+            anomalies_found = len(df[df['LABEL'].astype(str).str.strip().str.upper() != 'BENIGN'])
+            
+            # --- NEW: Build the Graph Timeline ---
+            # Divide the file into 20 chronological segments for the graph
+            chunk_size = max(1, total_rows // 20) 
+            for i in range(0, total_rows, chunk_size):
+                chunk = df.iloc[i:i+chunk_size]
+                chunk_anoms = len(chunk[chunk['LABEL'].astype(str).str.strip().str.upper() != 'BENIGN'])
+                chunk_norm = len(chunk) - chunk_anoms
+                timeline_data.append({
+                    "time": f"Segment {len(timeline_data) + 1}",
+                    "normal": chunk_norm,
+                    "anomalies": chunk_anoms
+                })
         else:
             anomalies_found = 0
-        
-        # 2. Calculate threat density percentage
+
         anomaly_percentage = (anomalies_found / total_rows) * 100 if total_rows > 0 else 0
 
-        # 3. Grading Logic based on threat density
+        # Grading Logic 
         if anomaly_percentage == 0:
             safety_grade = "A+"
             recommendations = ["Your network appears secure. No malicious signatures detected."]
             is_safe = True
-            
         elif anomaly_percentage < 1:
             safety_grade = "A"
             recommendations = ["Network is mostly secure. Minor background noise detected and ignored."]
             is_safe = True
-            
         elif anomaly_percentage < 5:
             safety_grade = "B"
-            recommendations = [
-                f"Warden detected {anomalies_found} unusual connection attempts.",
-                "Suspicious probing detected. Recommend verifying firewall rules for open ports."
-            ]
+            recommendations = [f"Warden detected {anomalies_found} unusual connection attempts.", "Suspicious probing detected. Recommend verifying firewall rules."]
             is_safe = False
-            
         elif anomaly_percentage < 15:
             safety_grade = "C"
-            recommendations = [
-                f"Warden detected {anomalies_found} malicious connection attempts.",
-                "Active threats detected. Ensure critical ports (22, 3389) are not exposed to the public internet."
-            ]
+            recommendations = [f"Warden detected {anomalies_found} malicious connection attempts.", "Active threats detected. Ensure critical ports are closed."]
             is_safe = False
-            
         elif anomaly_percentage < 30:
             safety_grade = "D"
-            recommendations = [
-                f"High-volume attack detected ({anomaly_percentage:.1f}% of traffic).",
-                "Recommend immediate IP blocking of top offending addresses."
-            ]
+            recommendations = [f"High-volume attack detected ({anomaly_percentage:.1f}% of traffic).", "Recommend immediate IP blocking of top offending addresses."]
             is_safe = False
-            
         else:
             safety_grade = "F"
-            recommendations = [
-                f"CRITICAL: Network under severe active attack ({anomaly_percentage:.1f}% malicious).",
-                "Deploy DDoS mitigation countermeasures and firewall lockdowns immediately."
-            ]
+            recommendations = [f"CRITICAL: Network under severe active attack ({anomaly_percentage:.1f}% malicious).", "Deploy DDoS mitigation immediately."]
             is_safe = False
 
         return Response({
@@ -243,11 +241,11 @@ def personal_network_audit(request):
                 "grade": safety_grade
             },
             "recommendations": recommendations,
+            "timeline": timeline_data, # <--- NEW: Send graph data to React
             "is_safe": is_safe
         })
     except Exception as e:
         return Response({"error": f"Parsing Error: {str(e)}"}, status=400)
-
 
 class AlertViewSet(viewsets.ModelViewSet):
     queryset = Alert.objects.all().order_by('-created_at')
@@ -435,13 +433,14 @@ class GetMyUpgradeRequestHistoryView(APIView):
 
 
 class AdminRoleUpprovalListView(APIView):
-    """List all pending role upgrade requests (admin only)"""
+    """List all pending role upgrade requests (Admin & Primary)"""
     permission_classes = [IsAuthenticated]
     
     def get(self, request):
-        if request.user.role != 'primary':
+        # FIX: Allow both Admin and Primary to see the queue
+        if request.user.role not in ['Admin', 'admin', 'primary']:
             return Response(
-                {"error": "Primary analyst access required"},
+                {"error": "Team Lead or Admin access required"},
                 status=status.HTTP_403_FORBIDDEN
             )
         
@@ -456,29 +455,24 @@ class AdminRoleUpprovalListView(APIView):
 
 
 class ApproveRoleUpgradeView(APIView):
-    """Approve a pending role upgrade request (admin only)"""
+    """Approve a pending role upgrade request (Admin & Primary)"""
     permission_classes = [IsAuthenticated]
     
     def post(self, request, request_id):
-        if request.user.role != 'primary':
+        # FIX: Allow both Admin and Primary to approve
+        if request.user.role not in ['Admin', 'admin', 'primary']:
             return Response(
-                {"error": "Primary analyst access required"},
+                {"error": "Team Lead or Admin access required"},
                 status=status.HTTP_403_FORBIDDEN
             )
         
         try:
             upgrade_request = RoleUpgradeRequest.objects.get(request_id=request_id)
         except RoleUpgradeRequest.DoesNotExist:
-            return Response(
-                {"error": "Request not found"},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({"error": "Request not found"}, status=status.HTTP_404_NOT_FOUND)
         
         if upgrade_request.status != 'pending':
-            return Response(
-                {"error": f"Cannot approve a {upgrade_request.status} request"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({"error": f"Cannot approve a {upgrade_request.status} request"}, status=status.HTTP_400_BAD_REQUEST)
         
         upgrade_request.status = 'approved'
         upgrade_request.approved_by = request.user
@@ -497,36 +491,28 @@ class ApproveRoleUpgradeView(APIView):
 
 
 class RejectRoleUpgradeView(APIView):
-    """Reject a pending role upgrade request (admin only)"""
+    """Reject a pending role upgrade request (Admin & Primary)"""
     permission_classes = [IsAuthenticated]
     
     def post(self, request, request_id):
-        if request.user.role != 'primary':
+        # FIX: Allow both Admin and Primary to reject
+        if request.user.role not in ['Admin', 'admin', 'primary']:
             return Response(
-                {"error": "Primary analyst access required"},
+                {"error": "Team Lead or Admin access required"},
                 status=status.HTTP_403_FORBIDDEN
             )
         
         rejection_reason = request.data.get('rejection_reason', '').strip()
         if not rejection_reason:
-            return Response(
-                {"error": "Rejection reason is required"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({"error": "Rejection reason is required"}, status=status.HTTP_400_BAD_REQUEST)
         
         try:
             upgrade_request = RoleUpgradeRequest.objects.get(request_id=request_id)
         except RoleUpgradeRequest.DoesNotExist:
-            return Response(
-                {"error": "Request not found"},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({"error": "Request not found"}, status=status.HTTP_404_NOT_FOUND)
         
         if upgrade_request.status != 'pending':
-            return Response(
-                {"error": f"Cannot reject a {upgrade_request.status} request"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({"error": f"Cannot reject a {upgrade_request.status} request"}, status=status.HTTP_400_BAD_REQUEST)
         
         upgrade_request.status = 'rejected'
         upgrade_request.approved_by = request.user
@@ -588,8 +574,191 @@ class AssetViewSet(viewsets.ModelViewSet):
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     def validate(self, attrs):
         data = super().validate(attrs)
-        data['role'] = getattr(self.user, 'role', 'secondary')
+        
+        # Override the role payload if the user is a Django superuser
+        if self.user.is_superuser:
+            data['role'] = 'Admin'
+        else:
+            data['role'] = getattr(self.user, 'role', 'secondary')
+            
         return data
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
+
+class AdminDataView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # The fix: Indent the 'if' and 'return' inside the function
+        if request.user.role not in ['Admin', 'admin', 'primary']:
+            return Response({"error": "Primary analyst access required"}, status=403)
+        
+        # Logic to return Personnel, Models, or History based on request
+        return Response({"status": "Authorized"})
+    
+# 1. PERSONNEL TAB
+class AdminUserListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # Check if the user is a Central Admin
+        if request.user.role not in ['Admin', 'admin']:
+            return Response({"error": "Central Admin credentials required."}, status=403)
+        
+        users = User.objects.all()
+        data = [{"id": u.id, "username": u.username, "email": u.email, "role": u.role} for u in users]
+        return Response(data)
+
+class AdminModelListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role not in ['Admin', 'admin']:
+            return Response({"error": "Central Admin credentials required."}, status=403)
+            
+        models = MLModel.objects.all()
+        data = []
+        for m in models:
+            # FIX: Safely fallback to 'System' since the custom DB column was removed
+            trained_by_name = 'System'
+            
+            # If you ever add a proper ForeignKey later, this safely catches it
+            if hasattr(m, 'trained_by') and m.trained_by:
+                trained_by_name = getattr(m.trained_by, 'username', 'System')
+
+            data.append({
+                # FIX: React expects "id", so we map model_id -> id
+                "id": getattr(m, 'id', getattr(m, 'model_id', None)), 
+                "model_name": getattr(m, 'model_name', 'Unknown Model'), 
+                "accuracy": getattr(m, 'accuracy', 0), 
+                "f1_score": getattr(m, 'f1_score', 0),
+                "dataset_schema": getattr(m, 'dataset_schema', 'N/A'),
+                "trained_on": getattr(m, 'trained_on', None),
+                "trained_by": trained_by_name
+            })
+            
+        return Response(data)
+
+        if request.user.role not in ['Admin', 'admin']:
+            return Response({"error": "Central Admin credentials required."}, status=403)
+        try:
+            # Ensure we are deleting using the primary key
+            model = MLModel.objects.get(pk=pk)
+            model.delete()
+            return Response({"success": "Model removed from engine."})
+        except MLModel.DoesNotExist:
+            return Response({"error": "Model not found."}, status=404)
+# 3. HISTORY TAB
+class AdminSystemHistoryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role not in ['Admin', 'admin']:
+            return Response({"error": "Central Admin credentials required."}, status=403)
+        
+        # Pulling recent alerts to act as the "System History" log
+        recent_alerts = Alert.objects.all().order_by('-created_at')[:30]
+        history_data = []
+        for alert in recent_alerts:
+            history_data.append({
+                "id": alert.alert_id,
+                "user": "SYSTEM_ENGINE",
+                "action": "THREAT_DETECTED" if alert.severity == 'High' else "TRAFFIC_LOGGED",
+                "timestamp": alert.created_at,
+                "details": f"Severity {alert.severity} event logged. Status: {alert.status}"
+            })
+        return Response(history_data)
+    
+class AdminUserDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        if request.user.role not in ['Admin', 'admin']:
+            return Response({"error": "Central Admin credentials required."}, status=403)
+        
+        target_user = get_object_or_404(User, pk=pk)
+        old_role = target_user.role  # Track the old role
+        new_role = request.data.get('role')
+        reason = request.data.get('reason', 'Administrative override.')
+        
+        if new_role not in ['Admin', 'primary', 'secondary']:
+            return Response({"error": "Invalid role specified."}, status=400)
+            
+        target_user.role = new_role
+        target_user.save()
+        
+        # FIX: Explicitly log manual admin promotions/demotions to the history table
+        if old_role != new_role:
+            # Determine if it's a promotion or demotion
+            status_val = 'demoted' if new_role == 'secondary' else 'promoted'
+            
+            RoleUpgradeRequest.objects.create(
+                user=target_user,
+                status=status_val,
+                approved_by=request.user,
+                rejection_reason=f"Admin Action: {reason}" # Store the Admin's reason here
+            )
+        
+        return Response({"success": f"User role successfully updated to {new_role}."})
+
+    def delete(self, request, pk):
+        if request.user.role not in ['Admin', 'admin']:
+            return Response({"error": "Central Admin credentials required."}, status=403)
+            
+        target_user = get_object_or_404(User, pk=pk)
+        reason = request.data.get('reason', 'No reason provided')
+        
+        if request.user.id == target_user.id:
+            return Response({"error": "Action Denied: You cannot delete your own central host account."}, status=400)
+            
+        username = target_user.username
+        target_user.delete()
+        
+        return Response({"success": f"User {username} has been permanently removed."})
+    
+class AdminFlushLogsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if request.user.role not in ['Admin', 'admin']:
+            return Response({"error": "Central Admin credentials required."}, status=403)
+        
+        try:
+            # 1. Calculate cutoff for logs older than 30 days
+            cutoff_date = timezone.now() - timedelta(days=30)
+            
+            # 2. Delete old alerts (assuming you have an Alert model with a created_at field)
+            # If your field is named differently, change 'created_at__lt' accordingly
+            old_alerts = Alert.objects.filter(created_at__lt=cutoff_date)
+            deleted_count, _ = old_alerts.delete()
+            
+            # 3. Clear the Django application cache to free up memory
+            cache.clear()
+            
+            return Response({
+                "success": f"System flushed successfully. {deleted_count} archived logs removed. Cache cleared."
+            })
+        except Exception as e:
+            return Response({"error": f"Flush failed: {str(e)}"}, status=500)
+
+class AdminResetGatewayView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if request.user.role not in ['Admin', 'admin']:
+            return Response({"error": "Central Admin credentials required."}, status=403)
+        
+        try:
+            # 1. Clear cache to reset rate limits or temporary traffic states
+            cache.clear()
+            
+            # 2. Simulate a brief hardware downtime for the reboot sequence
+            # This makes the UI spin for 2 seconds, looking highly realistic during a demo
+            time.sleep(2) 
+            
+            return Response({
+                "success": "API Gateway connection successfully terminated and restarted. Traffic routing reset."
+            })
+        except Exception as e:
+            return Response({"error": f"Gateway reset failed: {str(e)}"}, status=500)

@@ -1,4 +1,4 @@
-from django import views
+from . import views
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import CustomTokenObtainPairView
@@ -19,9 +19,6 @@ from .views import (
 router = DefaultRouter()
 router.register(r'traffic', TrafficViewSet)
 router.register(r'alerts', AlertViewSet)
-
-# FIX 1: Changed to 'model' so Django REST Framework automatically 
-# creates the /api/model/train/ endpoint for the @action in views.py
 router.register(r'model', ModelTrainingViewSet, basename='model') 
 # ----------------------------------------
 
@@ -41,4 +38,14 @@ urlpatterns = [
     path('role-upgrade-requests/<int:request_id>/approve/', ApproveRoleUpgradeView.as_view(), name='approve_role_upgrade'),
     path('role-upgrade-requests/<int:request_id>/reject/', RejectRoleUpgradeView.as_view(), name='reject_role_upgrade'),
     path('role-upgrade-requests/<int:request_id>/cancel/', CancelRoleUpgradeView.as_view(), name='cancel_role_upgrade'),
+
+
+
+    path('admin/flush-logs/', views.AdminFlushLogsView.as_view(), name='admin-flush-logs'),
+    path('admin/reset-gateway/', views.AdminResetGatewayView.as_view(), name='admin-reset-gateway'),
+    path('admin/users/', views.AdminUserListView.as_view(), name='admin-users'),
+    path('admin/users/<int:pk>/', views.AdminUserDetailView.as_view(), name='admin-user-detail'),
+    path('admin/models/', views.AdminModelListView.as_view(), name='admin-models'),
+    path('admin/models/<int:pk>/', views.AdminModelListView.as_view(), name='admin-models-delete'),
+    path('admin/system-history/', views.AdminSystemHistoryView.as_view(), name='admin-history'),
 ]

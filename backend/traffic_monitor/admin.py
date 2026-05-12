@@ -1,40 +1,40 @@
 from django.contrib import admin
-from .models import User, NetworkTraffic, Alert, MLModel, FeedbackLog, KnownAsset
+from .models import User, MLModel, Alert, NetworkTraffic, FeedbackLog, RoleUpgradeRequest
 
-# 1. Register the Admin-Only Models
-# These will appear in the Admin Panel for full management (Add/Edit/Delete)
-@admin.register(KnownAsset)
-class KnownAssetAdmin(admin.ModelAdmin):
-    list_display = ('ip_address', 'device_type', 'trust_level')
-    search_fields = ('ip_address', 'device_type')
-    list_filter = ('trust_level', 'device_type')
-
-@admin.register(FeedbackLog)
-class FeedbackLogAdmin(admin.ModelAdmin):
-    list_display = ('feedback_id', 'alert', 'user', 'label', 'feedback_time')
-    list_filter = ('label', 'feedback_time')
-    # Optional: Make feedback logs read-only in admin so history isn't tampered with
-    # readonly_fields = ('alert', 'user', 'label', 'feedback_time')
-
-# 2. Register Shared Models (Optional)
-# You might want Admins to view these, but maybe not edit them manually
+# 1. View all personnel, differentiate based on roles
 @admin.register(User)
-class UserAdmin(admin.ModelAdmin):
-    list_display = ('username', 'email', 'role', 'created_at')
-    list_filter = ('role',)
+class CustomUserAdmin(admin.ModelAdmin):
+    list_display = ('username', 'email', 'role', 'is_staff', 'created_at')
+    list_filter = ('role', 'is_staff', 'created_at') # Creates a sidebar to filter by role
+    search_fields = ('username', 'email')
 
+# 2. View the models, and their info, accuracy
 @admin.register(MLModel)
 class MLModelAdmin(admin.ModelAdmin):
-    list_display = ('model_name', 'model_version', 'accuracy', 'threshold')
+    list_display = ('model_name', 'model_version', 'dataset_schema', 'f1_score', 'accuracy', 'trained_on')
+    list_filter = ('dataset_schema', 'model_name', 'trained_on')
+    search_fields = ('model_version', 'run_id')
+    date_hierarchy = 'trained_on' # Creates a top navigation to see "This Week's" models
 
-
+# 3. View new types of attacks and history
 @admin.register(Alert)
 class AlertAdmin(admin.ModelAdmin):
-    list_display = ('severity', 'status', 'created_at', 'traffic')
-    list_filter = ('severity', 'status')
+    list_display = ('alert_id', 'severity', 'status', 'created_at')
+    list_filter = ('severity', 'status', 'created_at') # Filter attacks by "Past 7 Days"
+    date_hierarchy = 'created_at' 
+    search_fields = ('severity',)
 
-@admin.register(NetworkTraffic)
-class NetworkTrafficAdmin(admin.ModelAdmin):
-    list_display = ('src_ip', 'dst_ip', 'protocol', 'anomaly_score', 'timestamp')
-    list_filter = ('protocol',)
-    search_fields = ('src_ip', 'dst_ip')
+# Manage Role Upgrades
+@admin.register(RoleUpgradeRequest)
+class RoleUpgradeAdmin(admin.ModelAdmin):
+    list_display = ('user', 'status', 'requested_at', 'approved_by')
+    list_filter = ('status', 'requested_at')
+
+# Basic view for remaining tables
+admin.site.register(FeedbackLog)
+admin.site.register(NetworkTraffic)
+
+# Customize the Admin Header for your Presentation
+admin.site.site_header = "Warden NIDS Central Administration"
+admin.site.site_title = "Warden Admin Portal"
+admin.site.index_title = "Welcome to the Central Security Dashboard"

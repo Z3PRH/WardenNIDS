@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Shield, Key, AlertTriangle, CheckCircle, Clock, X, History } from 'lucide-react';
+import { Shield, Key, AlertTriangle, CheckCircle, Clock, X, History, Settings as SettingsIcon } from 'lucide-react';
 import api from './lib/api';
 
 const Settings = () => {
@@ -8,388 +8,205 @@ const Settings = () => {
   const [statusMsg, setStatusMsg] = useState<{type: 'success' | 'error' | 'info' | '', text: string}>({type: '', text: ''});
   const [isLoading, setIsLoading] = useState(false);
   
-  // Request status states
-  const [requestStatus, setRequestStatus] = useState<'none' | 'pending' | 'approved' | 'rejected'>('none');
+  // Notice we now accept 'string' to handle our custom 'promoted' and 'demoted' statuses
+  const [requestStatus, setRequestStatus] = useState<string>('none');
   const [requestId, setRequestId] = useState<number | null>(null);
   const [rejectionReason, setRejectionReason] = useState('');
   const [requestedAt, setRequestedAt] = useState<string>('');
-  const [dismissedRejection, setDismissedRejection] = useState(false);
   
-  // Request history
+  const [dismissedRejection, setDismissedRejection] = useState(false);
+  const [dismissedApproved, setDismissedApproved] = useState(false);
+  
   const [requestHistory, setRequestHistory] = useState<any[]>([]);
   const [showHistory, setShowHistory] = useState(false);
 
-  // Load the current role and request status on mount
+  const userRole = localStorage.getItem('userRole') || 'secondary';
+  const isAdmin = userRole === 'Admin' || userRole === 'admin';
+
   useEffect(() => {
-    const savedRole = localStorage.getItem('userRole') || 'secondary';
-    setCurrentRole(savedRole);
-    
-    // Fetch current upgrade request status
-    fetchUpgradeRequestStatus();
-    
-    // Fetch request history
-    fetchRequestHistory();
-    
-    // Poll for status updates every 30 seconds
-    const interval = setInterval(fetchUpgradeRequestStatus, 30000);
-    return () => clearInterval(interval);
-  }, []);
+    setCurrentRole(userRole);
+    if (!isAdmin) {
+      fetchUpgradeRequestStatus();
+      fetchRequestHistory();
+    }
+  }, [userRole, isAdmin]);
 
   const fetchUpgradeRequestStatus = async () => {
     try {
       const response = await api.get('/my-upgrade-request/');
-      
-      // Get the current role - either from the response or fallback to what the backend knows
       const backendRole = response.data.current_role || localStorage.getItem('userRole') || 'secondary';
-      
-      // Sync localStorage with backend role
       if (backendRole !== localStorage.getItem('userRole')) {
         localStorage.setItem('userRole', backendRole);
       }
       setCurrentRole(backendRole);
       
-      if (response.data.status === 'none') {
-        setRequestStatus('none');
-        setRequestId(null);
-        setRejectionReason('');
-      } else {
-        // Check if user was demoted after approval
-        if (response.data.status === 'approved' && backendRole !== 'primary') {
-          // User was approved but then demoted, treat as no request
-          setRequestStatus('none');
-          setRequestId(null);
-          setStatusMsg({type: 'info', text: 'Your previous approval has been revoked. Your role is now ' + backendRole});
-          return;
-        }
-        
-        setRequestStatus(response.data.status as 'pending' | 'approved' | 'rejected');
+      if (response.data.status !== 'none') {
+        setRequestStatus(response.data.status);
         setRequestId(response.data.request_id);
-        setDismissedRejection(false);
         
-        if (response.data.status === 'approved' && backendRole === 'primary') {
-          // User is approved AND actually has primary role
-          setStatusMsg({type: 'success', text: 'Your role has been upgraded to Primary Analyst!'});
-        } else if (response.data.status === 'rejected') {
-          setRejectionReason(response.data.rejection_reason || 'No reason provided');
-          // Don't auto-show rejection - let user decide if they want to see it
-          setDismissedRejection(false);
+        // Map rejection_reason for both rejects AND demotions
+        if (response.data.status === 'rejected' || response.data.status === 'demoted') {
+           setRejectionReason(response.data.rejection_reason || 'Administrative Action');
         }
-        
-        if (response.data.requested_at) {
-          setRequestedAt(new Date(response.data.requested_at).toLocaleString());
-        }
+        if (response.data.requested_at) setRequestedAt(new Date(response.data.requested_at).toLocaleString());
       }
-    } catch (err: any) {
-      // No request found is ok, just keep current status
-      console.error('Error fetching upgrade status:', err);
-    }
+    } catch (err) { console.error(err); }
   };
 
   const fetchRequestHistory = async () => {
     try {
       const response = await api.get('/my-upgrade-request-history/');
       setRequestHistory(response.data || []);
-    } catch (err: any) {
-      console.error('Error fetching request history:', err);
-      setRequestHistory([]);
-    }
+    } catch (err) { console.error(err); }
   };
 
   const handleUpgrade = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
-    setStatusMsg({type: '', text: ''});
-
     try {
       const response = await api.post('/upgrade-role/', { passcode });
-      
       setRequestStatus('pending');
       setRequestId(response.data.request_id);
       setRequestedAt(new Date().toLocaleString());
-      
-      setStatusMsg({type: 'info', text: response.data.message});
       setPasscode('');
-      
-    } catch (err: any) {
-      const errorMsg = err.response?.data?.error || 'Authorization denied. Invalid passcode.';
-      
-      // Handle the case where user was demoted but backend still has old approval
-      if (errorMsg.includes('already been upgraded') && currentRole === 'secondary') {
-        setStatusMsg({
-          type: 'info', 
-          text: 'Clearing your previous request. Please try again.'
-        });
-        // Clear the old request and allow retry
-        setRequestStatus('none');
-        setRequestId(null);
-        
-        // Retry after a brief delay
-        setTimeout(() => {
-          setPasscode('');
-        }, 1500);
-      } else {
-        setStatusMsg({
-          type: 'error', 
-          text: errorMsg
-        });
-      }
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleCancelRequest = async () => {
-    if (!requestId) return;
-    
-    try {
-      await api.post(`/role-upgrade-requests/${requestId}/cancel/`);
-      setRequestStatus('none');
-      setRequestId(null);
-      setStatusMsg({type: 'success', text: 'Request cancelled. You can submit a new one anytime.'});
-    } catch (err: any) {
-      setStatusMsg({
-        type: 'error',
-        text: err.response?.data?.error || 'Failed to cancel request'
-      });
-    }
-  };
-
-  const handleClearOldApproval = async () => {
-    // If user is secondary but has an old approved status, clear it
-    if (currentRole === 'secondary' && requestId) {
-      try {
-        await api.post(`/role-upgrade-requests/${requestId}/cancel/`);
-        setRequestStatus('none');
-        setRequestId(null);
-        setStatusMsg({type: 'success', text: 'Old approval cleared. You can now submit a new request.'});
-      } catch (err: any) {
-        setStatusMsg({
-          type: 'error',
-          text: err.response?.data?.error || 'Failed to clear approval'
-        });
-      }
-    }
+    } catch (err) { setStatusMsg({type: 'error', text: 'Invalid Passcode'}); }
+    finally { setIsLoading(false); }
   };
 
   return (
     <div className="p-8 max-w-4xl mx-auto text-slate-200">
-      <h1 className="text-3xl font-bold mb-8 flex items-center gap-3">
-        <Shield className="text-neon-green w-8 h-8" /> 
-        System Configuration
-      </h1>
-
-      {/* Current Status Card */}
-      <div className="bg-slate-900 border border-slate-800 p-6 rounded-lg mb-8">
-        <h2 className="text-lg text-slate-400 font-mono uppercase mb-4">Current Authorization Level</h2>
-        <div className="flex items-center gap-4">
-          <div className={`px-4 py-2 rounded font-mono font-bold tracking-widest uppercase ${currentRole === 'primary' ? 'bg-neon-green text-black' : 'bg-slate-700 text-slate-300'}`}>
-            {currentRole} Analyst
-          </div>
-          <p className="text-sm text-slate-500">
-            {currentRole === 'primary' 
-              ? "You have full system access, including threat resolution and model configuration." 
-              : "Read-only access. System monitoring only."}
-          </p>
-        </div>
+      <div className="flex items-center gap-4 mb-8 border-b border-slate-800 pb-6">
+        <SettingsIcon className="w-8 h-8 text-neon-green" />
+        <h1 className="text-3xl font-bold tracking-tight uppercase">
+          {isAdmin ? 'Central Host Configuration' : 'System Configuration'}
+        </h1>
       </div>
 
-      {/* Request Status Display */}
-      {requestStatus === 'pending' && (
-        <div className="bg-slate-900 border border-blue-500/30 p-6 rounded-lg mb-8 bg-blue-500/10">
-          <h2 className="text-lg text-blue-400 font-mono uppercase mb-4 flex items-center gap-2">
-            <Clock className="w-5 h-5" /> Upgrade Request Pending
-          </h2>
-          <div className="space-y-3">
-            <p className="text-sm text-slate-300">
-              Your role upgrade request is awaiting admin approval. You will be notified once it is reviewed.
-            </p>
-            <p className="text-xs text-slate-500">
-              Submitted: {requestedAt}
-            </p>
-            <button
-              onClick={handleCancelRequest}
-              className="bg-red-900 hover:bg-red-800 text-white font-mono px-4 py-2 rounded text-sm transition-colors flex items-center gap-2"
-            >
-              <X className="w-4 h-4" /> Cancel Request
-            </button>
-          </div>
-        </div>
-      )}
-
-      {requestStatus === 'rejected' && !dismissedRejection && (
-        <div className="bg-slate-900 border border-red-500/30 p-6 rounded-lg mb-8 bg-red-500/10 relative">
-          <button
-            onClick={() => {
-              setDismissedRejection(true);
-              setRequestStatus('none');
-            }}
-            className="absolute top-4 right-4 text-red-400 hover:text-red-300 transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
-          <h2 className="text-lg text-red-400 font-mono uppercase mb-4 flex items-center gap-2">
-            <AlertTriangle className="w-5 h-5" /> Request Rejected
-          </h2>
-          <div className="space-y-3">
-            <div className="bg-slate-800 p-3 rounded border border-slate-700">
-              <p className="text-xs text-slate-400 font-mono">Admin Reason:</p>
-              <p className="text-sm text-slate-300 mt-1">{rejectionReason}</p>
-            </div>
-            <p className="text-xs text-slate-500">
-              You can submit a new request below.
-            </p>
-          </div>
-        </div>
-      )}
-
-      {requestStatus === 'approved' && (
-        <div className="bg-slate-900 border border-green-500/30 p-6 rounded-lg mb-8 bg-green-500/10">
-          <h2 className="text-lg text-green-400 font-mono uppercase mb-4 flex items-center gap-2">
-            <CheckCircle className="w-5 h-5" /> Request Approved
-          </h2>
-          <p className="text-sm text-slate-300">
-            Your role upgrade has been approved by an administrator. Please refresh the page to access all primary analyst features.
-          </p>
-          {currentRole === 'secondary' && (
-            <div className="mt-4 p-4 bg-slate-800 border border-slate-700 rounded">
-              <p className="text-xs text-slate-400 mb-2">Your current role is secondary. This may indicate you were demoted after approval.</p>
-              <button
-                onClick={handleClearOldApproval}
-                className="bg-red-900 hover:bg-red-800 text-white font-mono px-4 py-2 rounded text-sm transition-colors"
-              >
-                Clear Old Approval
+      {isAdmin && (
+        <div className="space-y-6 mb-12">
+          <div className="bg-slate-900 border border-red-900/30 p-6 rounded-lg bg-red-900/5">
+            <h2 className="text-lg text-red-400 font-mono uppercase mb-4 flex items-center gap-2">
+              <Shield className="w-5 h-5" /> Central Authority Controls
+            </h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <button className="border border-red-900/50 hover:bg-red-900/20 text-red-400 font-mono py-3 rounded transition-colors">
+                FLUSH SYSTEM LOGS
+              </button>
+              <button className="border border-red-900/50 hover:bg-red-900/20 text-red-400 font-mono py-3 rounded transition-colors">
+                RESET API GATEWAY
               </button>
             </div>
-          )}
-          {currentRole === 'primary' && (
-            <button
-              onClick={() => window.location.reload()}
-              className="mt-4 bg-neon-green hover:bg-neon-green/80 text-black font-mono px-6 py-2 rounded transition-colors"
-            >
-              Refresh Page
-            </button>
-          )}
+          </div>
         </div>
       )}
 
-      {/* Privilege Escalation Form (Hidden if request is pending/approved) */}
-      {(requestStatus === 'none' || requestStatus === 'rejected') && currentRole !== 'primary' && (
-        <div className="bg-slate-900 border border-slate-800 p-6 rounded-lg">
-          <h2 className="text-lg text-slate-400 font-mono uppercase mb-4 flex items-center gap-2">
-            <Key className="w-5 h-5" /> Request Primary Analyst Access
-          </h2>
-          
-          <form onSubmit={handleUpgrade} className="space-y-4">
-            <div>
-              <label className="block text-sm font-mono text-slate-500 mb-2">Enter Authorization Passcode</label>
-              <input 
-                type="password"
-                value={passcode}
-                onChange={(e) => setPasscode(e.target.value)}
-                className="w-full bg-black border border-slate-700 p-3 text-neon-green font-mono focus:outline-none focus:border-neon-green transition-colors"
-                placeholder="••••••••••••••••"
-                required
-                disabled={isLoading}
-              />
+      {!isAdmin && (
+        <div className="space-y-8">
+          <div className="bg-slate-900 border border-slate-800 p-6 rounded-lg">
+            <h2 className="text-lg text-slate-400 font-mono uppercase mb-4">Authorization Level</h2>
+            <div className={`px-4 py-2 rounded font-mono font-bold inline-block ${currentRole === 'primary' ? 'bg-neon-green/10 text-neon-green border border-neon-green/20' : 'bg-slate-800 text-slate-300 border border-slate-700'}`}>
+              {currentRole.toUpperCase()} ANALYST
             </div>
-            
-            <button 
-              type="submit" 
-              disabled={isLoading}
-              className="bg-slate-800 hover:bg-slate-700 text-white font-mono px-6 py-3 rounded transition-colors disabled:opacity-50"
-            >
-              {isLoading ? 'Submitting...' : 'Submit Request'}
-            </button>
-          </form>
+          </div>
 
-          {/* Feedback Messages */}
-          {statusMsg.text && (
-            <div className={`mt-4 p-4 flex items-start gap-3 border ${
-              statusMsg.type === 'success' ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' : 
-              statusMsg.type === 'info' ? 'bg-blue-500/10 border-blue-500/30 text-blue-400' :
-              'bg-red-500/10 border-red-500/30 text-red-400'
-            }`}>
-              {statusMsg.type === 'success' ? <CheckCircle className="w-5 h-5 flex-shrink-0 mt-0.5" /> : 
-               statusMsg.type === 'info' ? <Clock className="w-5 h-5 flex-shrink-0 mt-0.5" /> :
-               <AlertTriangle className="w-5 h-5 flex-shrink-0 mt-0.5" />}
-              <p className="font-mono text-sm">{statusMsg.text}</p>
+          {/* Pending Alert */}
+          {requestStatus === 'pending' && (
+            <div className="bg-blue-500/10 border border-blue-500/30 p-6 rounded-lg">
+              <h2 className="text-blue-400 font-mono uppercase flex items-center gap-2">
+                <Clock className="w-5 h-5" /> Request ID: {requestId} - Pending
+              </h2>
+              <p className="text-xs text-slate-400 mt-2 font-mono">Submitted on: {requestedAt}</p>
             </div>
           )}
-        </div>
-      )}
 
-      {/* REQUEST HISTORY SECTION */}
-      <div className="bg-slate-900 border border-slate-800 p-6 rounded-lg mt-8">
-        <button
-          onClick={() => setShowHistory(!showHistory)}
-          className="flex items-center gap-3 w-full text-left hover:bg-slate-800 p-4 -m-4 rounded transition-colors"
-        >
-          <History className="w-5 h-5 text-slate-400" />
-          <h2 className="text-lg text-slate-400 font-mono uppercase">Request History</h2>
-          <span className="ml-auto text-xs bg-slate-700 px-3 py-1 rounded font-mono">
-            {requestHistory.length}
-          </span>
-        </button>
+          {/* Rejected Alert */}
+          {requestStatus === 'rejected' && !dismissedRejection && (
+            <div className="bg-red-500/10 border border-red-500/30 p-6 rounded-lg relative">
+              <button onClick={() => setDismissedRejection(true)} className="absolute top-4 right-4 text-red-400 hover:text-white transition-colors"><X /></button>
+              <h2 className="text-red-400 font-mono uppercase flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5" /> Upgrade Denied
+              </h2>
+              <p className="text-sm text-slate-300 mt-2 font-mono">Reason: {rejectionReason}</p>
+            </div>
+          )}
 
-        {showHistory && (
-          <div className="mt-6 space-y-3 border-t border-slate-700 pt-6">
-            {requestHistory.length === 0 ? (
-              <p className="text-sm text-slate-500 font-mono">No request history yet.</p>
-            ) : (
-              requestHistory.map((req) => (
-                <div
-                  key={req.request_id}
-                  className={`p-4 rounded border font-mono text-sm ${
-                    req.status === 'approved'
-                      ? 'bg-green-500/10 border-green-500/30'
-                      : req.status === 'rejected'
-                      ? 'bg-red-500/10 border-red-500/30'
-                      : req.status === 'pending'
-                      ? 'bg-blue-500/10 border-blue-500/30'
-                      : 'bg-slate-800 border-slate-700'
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <span className={`font-bold uppercase tracking-wide ${
-                      req.status === 'approved'
-                        ? 'text-green-400'
-                        : req.status === 'rejected'
-                        ? 'text-red-400'
-                        : req.status === 'pending'
-                        ? 'text-blue-400'
-                        : 'text-slate-400'
-                    }`}>
-                      {req.status}
-                    </span>
-                    <span className="text-xs text-slate-500">
-                      Requested: {new Date(req.requested_at).toLocaleString()}
-                    </span>
-                  </div>
+          {/* Demoted Alert */}
+          {requestStatus === 'demoted' && !dismissedRejection && (
+            <div className="bg-red-900/20 border border-red-500/50 p-6 rounded-lg relative">
+              <button onClick={() => setDismissedRejection(true)} className="absolute top-4 right-4 text-red-400 hover:text-white transition-colors"><X /></button>
+              <h2 className="text-red-400 font-mono uppercase flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5" /> Authorization Revoked
+              </h2>
+              <p className="text-sm text-slate-300 mt-2 font-mono">
+                You have been demoted to Secondary Analyst.
+              </p>
+              <p className="text-xs text-red-300/70 mt-1 font-mono">Reason: {rejectionReason}</p>
+            </div>
+          )}
 
-                  {req.reviewed_at && (
-                    <p className="text-xs text-slate-400 mb-2">
-                      Reviewed: {new Date(req.reviewed_at).toLocaleString()}
-                    </p>
-                  )}
+          {/* Approved / Promoted Alert */}
+          {(requestStatus === 'approved' || requestStatus === 'promoted') && !dismissedApproved && (
+            <div className="bg-neon-green/10 border border-neon-green/30 p-6 rounded-lg relative">
+              <button onClick={() => setDismissedApproved(true)} className="absolute top-4 right-4 text-neon-green hover:text-white transition-colors"><X /></button>
+              <h2 className="text-neon-green font-mono uppercase flex items-center gap-2">
+                <CheckCircle className="w-5 h-5" /> Privileges Escalated
+              </h2>
+              <p className="text-sm text-slate-300 mt-2 font-mono">
+                You now have full access to Primary Analyst tools (Training, Analytics, and Alerts).
+              </p>
+            </div>
+          )}
 
-                  {req.approved_by && (
-                    <p className="text-xs text-slate-400 mb-2">
-                      By: {req.approved_by.username}
-                    </p>
-                  )}
+          {/* Upgrade Request Form (Now allows demoted users to request again) */}
+          {['none', 'rejected', 'demoted'].includes(requestStatus) && currentRole !== 'primary' && (
+            <div className="bg-slate-900 border border-slate-800 p-6 rounded-lg">
+              <h2 className="text-lg text-slate-400 font-mono uppercase mb-4 flex items-center gap-2">
+                <Key className="w-5 h-5" /> Escalate Privileges
+              </h2>
+              <form onSubmit={handleUpgrade} className="space-y-4">
+                <input 
+                  type="password" value={passcode} onChange={(e) => setPasscode(e.target.value)}
+                  className="w-full bg-black border border-slate-700 p-3 text-neon-green font-mono focus:border-neon-green outline-none"
+                  placeholder="AUTHORIZATION PASSCODE" required
+                />
+                {statusMsg.text && <p className="text-xs text-red-400 font-mono">{statusMsg.text}</p>}
+                <button type="submit" disabled={isLoading} className="bg-slate-800 hover:bg-slate-700 text-white font-mono px-6 py-3 rounded transition-colors">
+                  {isLoading ? 'SUBMITTING...' : 'SUBMIT REQUEST'}
+                </button>
+              </form>
+            </div>
+          )}
 
-                  {req.rejection_reason && (
-                    <div className="mt-2 p-3 bg-slate-900 border border-slate-700 rounded text-xs">
-                      <p className="text-slate-400 mb-1">Rejection Reason:</p>
-                      <p className="text-slate-300">{req.rejection_reason}</p>
+          {/* Request History */}
+          <div className="bg-slate-900 border border-slate-800 p-6 rounded-lg">
+            <button onClick={() => setShowHistory(!showHistory)} className="flex items-center justify-between w-full uppercase font-mono text-slate-400 hover:text-slate-300 transition-colors">
+              <div className="flex items-center gap-3"><History className="w-5 h-5" /> Request History</div>
+              <span className="bg-slate-800 px-3 py-1 rounded text-xs border border-slate-700">[{requestHistory.length}]</span>
+            </button>
+            {showHistory && (
+              <div className="mt-4 border-t border-slate-700 pt-4 space-y-2">
+                {requestHistory.map((req, i) => (
+                  <div key={i} className="text-xs font-mono p-3 bg-black/30 border border-slate-800 rounded flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+                    <div className="flex flex-col">
+                      <span className={`font-bold ${
+                        ['approved', 'promoted'].includes(req.status) ? 'text-neon-green' :
+                        ['rejected', 'demoted'].includes(req.status) ? 'text-red-400' :
+                        'text-blue-400'
+                      }`}>
+                        {req.status.toUpperCase()}
+                      </span>
+                      {req.rejection_reason && (
+                        <span className="text-[10px] text-slate-500 mt-0.5">{req.rejection_reason}</span>
+                      )}
                     </div>
-                  )}
-                </div>
-              ))
+                    <span className="text-slate-500 whitespace-nowrap">{new Date(req.requested_at).toLocaleString()}</span>
+                  </div>
+                ))}
+              </div>
             )}
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 };

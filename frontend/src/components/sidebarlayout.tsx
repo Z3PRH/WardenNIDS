@@ -19,50 +19,30 @@ const Sidebar = () => {
     navigate('/login');
   };
 
-  // 2. Add a 'requiresPrimary' flag to the restricted routes
   const menuItems = [
-    { 
-      icon: Activity, 
-      label: 'DASHBOARD',   
-      path: '/' 
-    },
-    { 
-      icon: Shield, 
-      label: 'DETECTION', 
-      path: '/detection',
-      allowedRole: 'secondary' 
-    },
-    { 
-      icon: Zap, 
-      label: 'TRAINING', 
-      path: '/training',
-      allowedRole: 'primary' 
-    },
-    { 
-      icon: BarChart3, 
-      label: 'ANALYTICS', 
-      path: '/analytics',
-      allowedRole: 'primary' 
-    },
-    { 
-      icon: Bell, 
-      label: 'ALERTS', 
-      path: '/alerts' 
-    },
-    { 
-      icon: Settings, 
-      label: 'SETTINGS', 
-      path: '/settings' 
-    },
+    { icon: Activity,  label: 'DASHBOARD',   path: '/',        role: 'secondary' },
+    { icon: Shield,    label: 'DETECTION',   path: '/detection', role: 'secondary' },
+    { icon: Zap,       label: 'TRAINING',    path: '/training',  role: 'primary' },
+    { icon: BarChart3, label: 'ANALYTICS',   path: '/analytics', role: 'primary' },
+    { icon: Bell,      label: 'ALERTS',      path: '/alerts',    role: 'primary' },
+    { icon: Settings,  label: 'SETTINGS',    path: '/settings' },
+    { icon: Shield,    label: 'ROLE APPROVALS', path: '/admin/role-approvals', role: 'Admin' },
   ];
 
-  const filteredMenu = menuItems.filter(item => {
-    // If no role is specified, everyone sees it
-    if (!item.allowedRole) return true;
-    // Otherwise, check if userRole matches the requirement
-    return item.allowedRole === userRole;
+  const filteredMenuItems = menuItems.filter(item => {
+    // 1. Admin Logic: Only see Admin tools and Settings
+    if (userRole === 'Admin' || userRole === 'admin') {
+      return item.role === 'Admin' || item.label === 'SETTINGS';
+    }
+    
+    // 2. Primary Logic: See primary tools, secondary tools, and Settings
+    if (userRole === 'primary') {
+      return item.role === 'primary' || item.role === 'secondary' || !item.role;
+    }
+    
+    // 3. Secondary Logic: See ONLY secondary tools and Settings (no role assigned)
+    return item.role === 'secondary' || !item.role;
   });
-
 
   return (
     <div className="flex h-screen bg-slate-950">
@@ -96,7 +76,7 @@ const Sidebar = () => {
         <nav className="flex-1 pt-4 px-2">
           <ul className="space-y-0.5">
             {/* Map over the FILTERED menu items */}
-            {filteredMenu.map((item) => (
+            {filteredMenuItems.map((item) => (
               <li key={item.path}>
                 <NavLink
                   to={item.path}
@@ -137,8 +117,14 @@ const Sidebar = () => {
           {/* Authorization Level Indicator */}
           <div className="px-4 mb-4">
              <div className="text-[10px] text-slate-600 uppercase tracking-widest mb-1">Auth Level</div>
-             <div className={`text-xs font-mono px-2 py-1 rounded inline-block ${userRole === 'primary' ? 'bg-neon-green/10 text-neon-green border border-neon-green/20' : 'bg-slate-800 text-slate-400 border border-slate-700'}`}>
-                {userRole === 'primary' ? 'PRIMARY ANALYST' : 'SECONDARY ANALYST'}
+             <div className={`text-xs font-mono px-2 py-1 rounded inline-block ${
+                userRole === 'Admin' ? 'bg-red-900/20 text-red-400 border border-red-900/30' : 
+                userRole === 'primary' ? 'bg-neon-green/10 text-neon-green border border-neon-green/20' : 
+                'bg-slate-800 text-slate-400 border border-slate-700'
+             }`}>
+                {userRole === 'Admin' ? 'CENTRAL ADMIN' : 
+                 userRole === 'primary' ? 'PRIMARY ANALYST' : 
+                 'SECONDARY ANALYST'}
              </div>
           </div>
 
